@@ -26,7 +26,7 @@ export function semanticTool() {
         boundaryBreak:{type:'object',additionalProperties:false,properties:{present:{type:'boolean'},boundaryId:{type:'string'},target:{type:'string'},kind:{type:'string'},response:{type:'string'},evidence:{type:'string'}},required:['present','boundaryId','target','kind']},
         claimCheck:{type:'object',additionalProperties:false,properties:{present:{type:'boolean'},target:{type:'string'},claim:{type:'string'},truth:{type:'string',enum:['true','false','uncertain','claimed']},access:{type:'string',enum:['knows_true','knows_false','can_verify','cannot_verify','unknown']},stakesImpact:{type:'boolean'}},required:['present','target','claim','truth','access','stakesImpact']},
         activeHostileThreat:{type:'boolean'},
-        scene:{type:'object',additionalProperties:false,properties:{location:{type:'string'},area:{type:'string'},indoors:{type:'boolean'},timeAdvance:{type:'integer',minimum:0,maximum:4},weather:{type:'string',enum:['',...weathers]},publicWitnesses:{type:'boolean'},danger:{type:'string',enum:['calm','active','crisis']}},required:['publicWitnesses','danger']},
+        scene:{type:'object',additionalProperties:false,properties:{location:{type:'string'},area:{type:'string'},indoors:{type:'boolean'},timeAdvance:{type:'integer',minimum:0,maximum:4},weather:{type:'string',enum:['',...weathers]},presentNpcs:{type:'array',maxItems:40,items:{type:'string'}},publicWitnesses:{type:'boolean'},danger:{type:'string',enum:['calm','active','crisis']}},required:['presentNpcs','publicWitnesses','danger']},
         transaction:{type:'object',additionalProperties:false,properties:{kind:{type:'string',enum:['none','quote','pay','gain','lose']},amount:{type:'number'},currency:{type:'string'},item:{type:'string'},target:{type:'string'}},required:['kind']},
         loot:{type:'object',additionalProperties:false,properties:{present:{type:'boolean'},target:{type:'string'},targetKind:{type:'string',enum:['humanoid','monster','container','other']},rank:{type:'string',enum:ranks}},required:['present','target','targetKind','rank']},
         memoryFacts:{type:'array',items:{type:'object',additionalProperties:false,properties:{fact:{type:'string'},scope:{type:'string',enum:['scene','location','world','user','npc']},subject:{type:'string'},salience:{type:'integer',minimum:1,maximum:5}},required:['fact','scope']}},
@@ -55,6 +55,8 @@ SOCIAL: record tactic and a short socialGoal. Mark explicitIntimidationOrCoercio
 BOUNDARIES: intimacyAdvanceExplicit is only for an explicit attempt to advance romantic/sexual intimacy. boundaryPressure is for object/space/departure or other established access boundaries, not ordinary flirting or disagreement. restraintControl is for physical restraint/control. boundaryBreak is ONLY for continuation/escalation after a pending boundary already shown in STATE CONTEXT, and its boundaryId/target/kind must match exactly; otherwise present=false.
 
 HOSTILITY: activeHostileThreat=true only when an active, immediate hostile threat already exists in the scene.
+
+SCENE PRESENCE: scene.presentNpcs is the COMPLETE list of NPCs physically present with the player at the start of the response, after the latest user input. Use established tracker names or stable descriptive labels. Preserve NPCs already present unless context clearly shows they left; exclude off-screen actors, remote contacts and Power Actors acting elsewhere. This is presence, not importance.
 
 NPC CAPABILITY: for a newly encountered actor, choose a capabilityPool from common/trained/elite/boss based on established fiction, plus mainStat PHY/MND/CHA/Balanced. rank is only a conservative fallback/summary; deterministic code assigns a stable new-NPC rank from the pool and then persists it. Never change an established NPC's rank from the tracker.
 
@@ -88,7 +90,7 @@ export function normalizeSemanticLedger(value:unknown):SemanticLedger {
     scene:{
       location:text(scene.location)||undefined, area:text(scene.area)||undefined, indoors:typeof scene.indoors==='boolean'?scene.indoors:undefined,
       timeAdvance:clampInt(scene.timeAdvance,0,4,0) as 0|1|2|3|4,
-      weather:weathers.includes(String(scene.weather) as Weather)?scene.weather as Weather:'', publicWitnesses:bool(scene.publicWitnesses,false),
+      weather:weathers.includes(String(scene.weather) as Weather)?scene.weather as Weather:'', presentNpcs:Array.isArray(scene.presentNpcs)?[...new Set(scene.presentNpcs.map((x:any)=>text(x).slice(0,120)).filter(Boolean))].slice(0,40):undefined, publicWitnesses:bool(scene.publicWitnesses,false),
       danger:['calm','active','crisis'].includes(String(scene.danger))?scene.danger as any:'calm',
     },
     transaction:Object.keys(tx).length?{kind:['none','quote','pay','gain','lose'].includes(String(tx.kind))?tx.kind:'none',amount:Number.isFinite(Number(tx.amount))?Number(tx.amount):undefined,currency:text(tx.currency)||undefined,item:text(tx.item)||undefined,target:text(tx.target)||undefined}:undefined,

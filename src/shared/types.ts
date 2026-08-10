@@ -87,6 +87,8 @@ export interface WorldState {
   dayIndex: number;
   time: TimeSlot;
   weather: Weather;
+  /** Complete list of tracker labels/names physically present in the current scene. */
+  presentNpcs: string[];
   facts: MemoryFact[];
   plans: WorldPlan[];
 }
@@ -291,6 +293,8 @@ export interface SemanticLedger {
     indoors?: boolean;
     timeAdvance?: 0 | 1 | 2 | 3 | 4;
     weather?: Weather | '';
+    /** Complete current-scene NPC presence at semantic preflight time. */
+    presentNpcs?: string[];
     publicWitnesses: boolean;
     danger: 'calm' | 'active' | 'crisis';
   };

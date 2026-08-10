@@ -8,7 +8,7 @@ export function createDefaultState() {
         player: null,
         npcs: {},
         health: { user: { maxHp: 10, currentHp: 10, dead: false, nonlethalDefeat: false }, npcs: {} },
-        world: { location: '', area: '', indoors: false, dayIndex: 1, time: 'morning', weather: 'clear', facts: [], plans: [] },
+        world: { location: '', area: '', indoors: false, dayIndex: 1, time: 'morning', weather: 'clear', presentNpcs: [], facts: [], plans: [] },
         reputation: [],
         progression: { xp: 0, level: 1, milestonesClaimed: 0, pendingMilestones: 0, history: [] },
         economy: { pendingPrice: null, equipmentTiers: [] },
@@ -78,6 +78,10 @@ export function normalizeState(value) {
         npcHealth[name] = normalizeHealthActor(object(npc), Math.round((lo + hi) / 2));
     }
     const world = object(src.world);
+    const normalizedTurn = Math.max(0, Math.floor(num(src.turn, 0)));
+    const legacyPresence = !Array.isArray(world.presentNpcs) && normalizedTurn > 0
+        ? Object.values(npcs).filter(n => n.status === 'active' && n.lastSeenTurn === normalizedTurn).map(n => n.name)
+        : [];
     const progression = object(src.progression);
     const economy = object(src.economy);
     const names = object(src.names);
@@ -87,7 +91,7 @@ export function normalizeState(value) {
     const pendingBoundary = object(continuity.pendingBoundary);
     return {
         version: STATE_VERSION,
-        turn: Math.max(0, Math.floor(num(src.turn, 0))),
+        turn: normalizedTurn,
         player,
         npcs,
         health: { user: userHealth, npcs: npcHealth },
@@ -96,6 +100,7 @@ export function normalizeState(value) {
             dayIndex: Math.max(1, Math.floor(num(world.dayIndex, 1))),
             time: ['morning', 'afternoon', 'evening', 'night'].includes(String(world.time)) ? world.time : 'morning',
             weather: ['clear', 'partly_cloudy', 'cloudy', 'overcast', 'light_rain', 'heavy_rain', 'storm'].includes(String(world.weather)) ? world.weather : 'clear',
+            presentNpcs: [...new Set((Array.isArray(world.presentNpcs) ? stringList(world.presentNpcs) : legacyPresence).map(x => x.slice(0, 120)))].slice(0, 40),
             facts: Array.isArray(world.facts) ? world.facts.slice(-MAX_MEMORY_FACTS).filter(Boolean) : [],
             plans: Array.isArray(world.plans) ? world.plans.slice(-80).filter(Boolean) : [],
         },
@@ -182,6 +187,7 @@ export function ensureNpc(state, name, rank = 'Average', role = 'NPC', seed = ''
 export function pruneState(state) {
     state.audits = state.audits.slice(-MAX_AUDITS);
     state.commandHistory = state.commandHistory.slice(-MAX_COMMAND_AUDITS);
+    state.world.presentNpcs = [...new Set(stringList(state.world.presentNpcs).map(x => x.slice(0, 120)))].slice(0, 40);
     state.world.facts = dedupeFacts(state.world.facts).slice(-MAX_MEMORY_FACTS);
     state.names.used = [...new Set(state.names.used.map(x => x.trim()).filter(Boolean))].slice(-MAX_USED_NAMES);
     state.continuity.latentFavors = state.continuity.latentFavors.slice(-120);

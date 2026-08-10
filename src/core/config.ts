@@ -1,8 +1,8 @@
 import type { StorySettings, Rank, ValueTier } from '../shared/types.js';
 
-export const STATE_VERSION = 7;
-export const STATE_CHAT_KEY = 'story_engine_state_v7';
-export const LEGACY_STATE_CHAT_KEYS = ['story_engine_state_v6'] as const;
+export const STATE_VERSION = 8;
+export const STATE_CHAT_KEY = 'story_engine_state_v8';
+export const LEGACY_STATE_CHAT_KEYS = ['story_engine_state_v7','story_engine_state_v6'] as const;
 export const SETTINGS_GLOBAL_KEY = 'story_engine_settings_v4';
 export const MAX_AUDITS = 64;
 export const MAX_MEMORY_FACTS = 120;

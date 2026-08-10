@@ -22,6 +22,10 @@ export function applyWorldSemantic(state: StoryState, sem: SemanticLedger, seed:
   if (typeof sem.scene.indoors === 'boolean') state.world.indoors = sem.scene.indoors;
   if (sem.scene.timeAdvance) advanceTime(state, sem.scene.timeAdvance, seed);
   if (sem.scene.weather) state.world.weather = sem.scene.weather;
+  if (Array.isArray(sem.scene.presentNpcs)) {
+    state.world.presentNpcs = [...new Set(sem.scene.presentNpcs.map(x=>String(x||'').trim()).filter(Boolean))].slice(0,40);
+    for (const name of state.world.presentNpcs) { const npc=state.npcs[name]; if(npc){npc.lastSeenTurn=state.turn;if(npc.status==='inactive')npc.status='active';} }
+  }
   for (const fact of sem.memoryFacts) addMemoryFact(state, fact.fact, fact.scope, fact.subject, fact.salience ?? 2);
   activateDuePlans(state);
   return notes;
@@ -93,6 +97,7 @@ export function worldSummary(state: StoryState): string {
   const facts = [...state.world.facts].sort((a,b)=>b.salience-a.salience || b.lastConfirmedTurn-a.lastConfirmedTurn).slice(0,10).map(f=>f.fact);
   return [
     `Scene: ${state.world.location || '(unknown)'}${state.world.area ? ` / ${state.world.area}` : ''}; day ${state.world.dayIndex}, ${state.world.time}; weather ${state.world.weather}; ${state.world.indoors?'indoors':'outdoors'}.`,
+    state.world.presentNpcs.length ? `NPCs physically present: ${state.world.presentNpcs.join(', ')}.` : 'NPCs physically present: none established.',
     facts.length ? `Established facts: ${facts.join(' | ')}` : '',
     due.length ? `Due off-screen plans: ${due.join(' | ')}` : '',
   ].filter(Boolean).join('\n');

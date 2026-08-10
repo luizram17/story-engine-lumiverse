@@ -67,3 +67,16 @@ The extension can attach to an already-running chat by reading the canonical sto
 - The original project has a very large, organically-grown semantic prompt surface with numerous micro-rules. This port preserves the systems and key mechanical contracts but rewrites the semantic contract into a typed compact ledger rather than copying the upstream prompt text.
 - The port uses seeded RNG keyed to chat/turn/fingerprint for stable replay. This is intentionally more reproducible than unseeded `Math.random()` on regeneration.
 - UI is redesigned around Lumiverse's drawer and widget system rather than reproducing SillyTavern markup.
+
+### 17. Silent attachment and scene-aware HUD
+There is no synthetic “Start Adventure” chat message. The extension attaches on frontend load/chat switch, bootstraps existing history when enabled, and begins on the next real user turn. The floating HUD exposes player resources plus an explicit current-scene NPC presence list; presence is separate from the historical tracker so off-screen NPCs remain tracked without appearing as present.
+
+### 18. Connection fallback is profile-based
+An empty selector no longer means “hope the host has a current connection”. Sidecar roles resolve the requested profile, then semantic inheritance, then the user default usable profile, then any usable profile with an API key.
+
+
+### 19. Active-chat events are not conflated
+`CHAT_SWITCHED` is the only event that changes the cached active chat. `CHAT_CHANGED` merely refreshes state when the changed chat is already active, preventing background mutations from silently redirecting Story Engine to another conversation.
+
+### 20. Unknown presence never clears known presence
+Current-scene NPC presence is a complete list when the semantic/post-turn assistant actually supplies it. Conservative/local semantic fallback leaves presence unspecified instead of treating “unknown” as an empty room; v7 states also recover NPCs seen on the current turn during migration.

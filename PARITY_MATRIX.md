@@ -32,6 +32,7 @@ This file is the implementation checklist used for the clean-room Lumiverse rema
 | Prose rules + repair pass | `core/prose.ts` + post-generation finalizer | Off/Review/Automatic; edits saved Lumiverse message directly instead of streaming hidden artifacts through ST Regex. |
 | Tracker delta / durable post-narration state | `buildPostTurnPrompt()` / `postTurnTool()` | Captures facts, knowledge, descriptions, name promotion, stable personality summary, NPC state, reputation and plan/boundary completion. |
 | Tracker UI | `frontend.ts` | Native drawer + floating widget; exposes NPCs, relationships, reputation, hidden continuity ledgers, memory, progression and audit. |
+| Current-scene NPC presence / floating player HUD | `world.presentNpcs`, semantic + post-turn presence reconciliation, `frontend.ts` | HUD lists only NPCs physically present while retaining the complete historical tracker; also exposes player HP, progression, stats, money, inventory, equipment, abilities, spells and scene. |
 | Swipe/regenerate consistency | backend transaction coordinator | Pre-turn snapshot + same `TurnResolution` replay prevents rerolling or duplicating HP, XP, money, relationships, events, names or loot. |
 | Streaming structured-artifact hiding | Not needed | Structured sidecar calls never enter the main assistant message. |
 

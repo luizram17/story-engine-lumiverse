@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { combatOutcome, nonHostileOutcome, resolveTurn } from '../dist/core/mechanics.js';
-import { createDefaultState, ensureNpc, rankFromCapabilityPool, makeCoreSnapshot, restoreCoreSnapshot } from '../dist/core/state.js';
+import { createDefaultState, normalizeState, ensureNpc, rankFromCapabilityPool, makeCoreSnapshot, restoreCoreSnapshot } from '../dist/core/state.js';
 import { conditionFromActor, applyDamage, applyHeal, safeSceneHealing } from '../dist/core/health.js';
 import { deterministicLoot, addCurrency, resolvePlayerEquipmentDefense } from '../dist/core/economy.js';
 import { collectProseFindings } from '../dist/core/prose.js';
@@ -10,6 +10,7 @@ import { applyContinuitySemantic, boundaryGate, upsertKnowledge } from '../dist/
 import { extractOocCommands, stripOocCommands, normalizeMutationBatch, applyMutationBatch } from '../dist/core/commands.js';
 import { validateCharacterInput } from '../dist/core/character.js';
 import { updateRelationships } from '../dist/core/relationships.js';
+import { applyWorldSemantic } from '../dist/core/world.js';
 
 assert.equal(combatOutcome(8,3).outcomeTier,'Critical_Success');
 assert.equal(combatOutcome(5,3).landedActions,2);
@@ -21,6 +22,22 @@ assert.equal(combatOutcome(-5,3).counterPotential,'medium');
 assert.equal(combatOutcome(-8,3).counterPotential,'severe');
 assert.equal(nonHostileOutcome(1).outcomeTier,'Success');
 assert.equal(nonHostileOutcome(-1).outcomeTier,'Failure');
+
+
+// Scene presence is explicit when known and conservative when semantic fallback cannot establish it.
+const presenceState=createDefaultState();
+const presentNpc=ensureNpc(presenceState,'Mira','Average','friend','presence-seed');
+presenceState.world.presentNpcs=['Mira'];
+const unknownPresence=normalizeSemanticLedger({summary:'small talk',actions:[],actors:[],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:false,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+assert.equal(unknownPresence.scene.presentNpcs,undefined);
+applyWorldSemantic(presenceState,unknownPresence,'presence-unknown');
+assert.deepEqual(presenceState.world.presentNpcs,['Mira'],'unknown semantic presence must not clear an established scene');
+const changedPresence=normalizeSemanticLedger({summary:'Mira leaves, guard remains',actions:[],actors:[],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{presentNpcs:['Gate Guard'],publicWitnesses:true,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+applyWorldSemantic(presenceState,changedPresence,'presence-known');
+assert.deepEqual(presenceState.world.presentNpcs,['Gate Guard']);
+const legacyPresence=normalizeState({...createDefaultState(),version:7,turn:3,world:{...createDefaultState().world,presentNpcs:undefined},npcs:{Mira:{...presentNpc,lastSeenTurn:3,status:'active'}}});
+assert.deepEqual(legacyPresence.world.presentNpcs,['Mira'],'v7 migration should conservatively recover NPCs seen on the current turn');
+
 
 // Starting character point-buy is exactly 15, with 1-9 per stat.
 assert.deepEqual(validateCharacterInput({name:'Balanced',race:'Human',genre:'Fantasy',concept:'',appearance:'',backstory:'',stats:{PHY:5,MND:5,CHA:5}}),[]);
