@@ -56,6 +56,12 @@ New NPCs resolve a stable rank from the upstream-style capability pool distribut
 ### 13. Hidden continuity ledgers are first-class state
 User knowledge, latent favors/grievances, descriptive archive, rapport clocks, bound companion, pending boundaries and world arcs are typed/versioned instead of being folded into freeform NPC notes.
 
+### 14. OOC administrative commands
+Double-parenthesis clauses are isolated from IC text, resolved by a dedicated Command Assistant, and applied through a validated generic story-state mutation layer. The assistant can retcon all story/mechanics namespaces while engine bookkeeping remains protected.
+
+### 15. Existing-chat bootstrap and arbitrary starting relationships
+The extension can attach to an already-running chat by reading the canonical stored history and reconstructing state. NPCs can begin with any established positive, negative, mixed, familial, romantic, professional, hierarchical or setting-specific relationship; freeform relationship descriptors preserve semantics beyond Bond/Fear/Hostility.
+
 ## Deliberate implementation differences
 
 - The original project has a very large, organically-grown semantic prompt surface with numerous micro-rules. This port preserves the systems and key mechanical contracts but rewrites the semantic contract into a typed compact ledger rather than copying the upstream prompt text.

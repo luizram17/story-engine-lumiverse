@@ -7,6 +7,9 @@ import { collectProseFindings } from '../dist/core/prose.js';
 import { generateUniqueNames } from '../dist/core/names.js';
 import { normalizeSemanticLedger } from '../dist/core/semantic.js';
 import { applyContinuitySemantic, boundaryGate, upsertKnowledge } from '../dist/core/continuity.js';
+import { extractOocCommands, stripOocCommands, normalizeMutationBatch, applyMutationBatch } from '../dist/core/commands.js';
+import { validateCharacterInput } from '../dist/core/character.js';
+import { updateRelationships } from '../dist/core/relationships.js';
 
 assert.equal(combatOutcome(8,3).outcomeTier,'Critical_Success');
 assert.equal(combatOutcome(5,3).landedActions,2);
@@ -18,6 +21,32 @@ assert.equal(combatOutcome(-5,3).counterPotential,'medium');
 assert.equal(combatOutcome(-8,3).counterPotential,'severe');
 assert.equal(nonHostileOutcome(1).outcomeTier,'Success');
 assert.equal(nonHostileOutcome(-1).outcomeTier,'Failure');
+
+// Starting character point-buy is exactly 15, with 1-9 per stat.
+assert.deepEqual(validateCharacterInput({name:'Balanced',race:'Human',genre:'Fantasy',concept:'',appearance:'',backstory:'',stats:{PHY:5,MND:5,CHA:5}}),[]);
+assert.ok(validateCharacterInput({name:'Too strong',race:'Human',genre:'Fantasy',concept:'',appearance:'',backstory:'',stats:{PHY:8,MND:8,CHA:8}}).some(x=>x.includes('15')));
+
+// OOC extraction is isolated from IC text and structured mutations can retcon story data.
+assert.deepEqual(extractOocCommands('I nod. ((Mira is my best friend)) Then I leave. ((Add a sword to my inventory))'),['Mira is my best friend','Add a sword to my inventory']);
+assert.equal(stripOocCommands('I nod. ((secret admin)) Then I leave.'),'I nod. Then I leave.');
+const commandState=createDefaultState();commandState.player={name:'Hero',race:'Human',genre:'Fantasy',appearance:'',stats:{PHY:5,MND:5,CHA:5},naturalWeapons:[],abilities:[],spells:[],inventory:[],currency:[],gear:[],anchors:[]};
+const batch=normalizeMutationBatch({summary:'retcon',operations:[{op:'append',path:['player','inventory'],value:'Sword'},{op:'set',path:['npcs','Mira','bond'],value:4},{op:'set',path:['npcs','Mira','role'],value:'best friend'}]});
+const commandApplied=applyMutationBatch(commandState,batch).state;
+assert.ok(commandApplied.player.inventory.includes('Sword'));assert.equal(commandApplied.npcs.Mira.bond,4);assert.ok(commandApplied.health.npcs.Mira);
+
+// A newly established NPC may begin with a non-neutral relationship and stable traits.
+const establishedState=createDefaultState();
+const establishedSem=normalizeSemanticLedger({summary:'meet old friend',actions:[],actors:[{name:'Lena',role:'childhood friend',rank:'Average',relation:'direct',powerActor:false,companion:true,initialBond:4,initialFear:0,initialHostility:0,personalityArchetype:'Protective confidante',personalitySummary:'Treats the player as her closest friend.',relationshipContext:'Best friends since childhood',initialRelationshipDescriptors:['childhood best friend','protective confidante']}],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:false,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+updateRelationships(establishedState,establishedSem,[],'established');
+assert.equal(establishedState.npcs.Lena.bond,4);
+assert.deepEqual(establishedState.npcs.Lena.relationshipDescriptors,['childhood best friend','protective confidante']);
+const hostileState=createDefaultState();
+const hostileSem=normalizeSemanticLedger({summary:'meet old enemy',actions:[],actors:[{name:'Varek',role:'former commander',rank:'Trained',relation:'direct',powerActor:false,companion:false,initialBond:0,initialFear:1,initialHostility:4,relationshipContext:'Sworn enemies after a military betrayal',initialRelationshipDescriptors:['sworn enemy','former commander','mutual history']}],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:false,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+updateRelationships(hostileState,hostileSem,[],'hostile-seed');
+assert.equal(hostileState.npcs.Varek.hostility,4);
+assert.equal(hostileState.npcs.Varek.disposition,'hatred');
+assert.ok(hostileState.npcs.Varek.relationshipDescriptors.includes('sworn enemy'));
+assert.equal(establishedState.npcs.Lena.companion,true);assert.match(establishedState.npcs.Lena.notes.join(' '),/Best friends since childhood/);
 
 assert.equal(conditionFromActor({maxHp:100,currentHp:100,dead:false,nonlethalDefeat:false}),'healthy');
 assert.equal(conditionFromActor({maxHp:100,currentHp:76,dead:false,nonlethalDefeat:false}),'bruised');

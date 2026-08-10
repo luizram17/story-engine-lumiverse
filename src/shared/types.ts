@@ -76,7 +76,9 @@ export interface NpcTrackerEntry {
   lootSearchCompleted: boolean;
   personalityArchetype?: string;
   personalitySummary?: string;
+  relationshipDescriptors: string[];
 }
+
 
 export interface WorldState {
   location: string;
@@ -209,6 +211,11 @@ export interface StorySettings {
   enabled: boolean;
   semanticEnabled: boolean;
   semanticConnectionId: string;
+  personaConnectionId: string;
+  commandConnectionId: string;
+  bootstrapConnectionId: string;
+  oocCommandsEnabled: boolean;
+  autoBootstrapExistingChat: boolean;
   semanticTemperature: number;
   recentMessageCount: number;
   proseGuardMode: ProseGuardMode;
@@ -254,6 +261,16 @@ export interface SemanticActor {
   relation: 'direct' | 'opposed' | 'benefited' | 'harmed' | 'observer' | 'neutral';
   powerActor: boolean;
   companion: boolean;
+  initialBond?: number;
+  initialFear?: number;
+  initialHostility?: number;
+  initialRomanceStage?: RomanceStage;
+  initialIntimacy?: number;
+  personalityArchetype?: string;
+  personalitySummary?: string;
+  initialNotes?: string[];
+  relationshipContext?: string;
+  initialRelationshipDescriptors?: string[];
   evidence?: string;
 }
 
@@ -366,6 +383,23 @@ export interface TurnAudit {
   notes: string[];
 }
 
+
+export interface BootstrapState {
+  status: 'none' | 'importing' | 'ready' | 'failed';
+  sourceMessageCount: number;
+  importedAt?: number;
+  lastMessageId?: string;
+  error?: string;
+}
+
+export interface CommandAudit {
+  fingerprint: string;
+  createdAt: number;
+  commands: string[];
+  summary: string;
+  operations: Array<{ op:string; path:Array<string|number>; value?:unknown }>;
+}
+
 export interface StoryState {
   version: number;
   turn: number;
@@ -378,6 +412,8 @@ export interface StoryState {
   economy: EconomyState;
   names: NameState;
   continuity: ContinuityState;
+  bootstrap: BootstrapState;
+  commandHistory: CommandAudit[];
   pending: TurnResolution | null;
   lastResolution: TurnResolution | null;
   audits: TurnAudit[];

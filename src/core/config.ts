@@ -1,16 +1,18 @@
 import type { StorySettings, Rank, ValueTier } from '../shared/types.js';
 
-export const STATE_VERSION = 6;
-export const STATE_CHAT_KEY = 'story_engine_state_v6';
+export const STATE_VERSION = 7;
+export const STATE_CHAT_KEY = 'story_engine_state_v7';
+export const LEGACY_STATE_CHAT_KEYS = ['story_engine_state_v6'] as const;
 export const SETTINGS_GLOBAL_KEY = 'story_engine_settings_v4';
 export const MAX_AUDITS = 64;
 export const MAX_MEMORY_FACTS = 120;
 export const MAX_USED_NAMES = 600;
 export const MAX_NPCS = 120;
 export const MAX_ACTIONS = 3;
+export const MAX_COMMAND_AUDITS = 64;
 
 export const PLAYER_STATS = ['PHY', 'MND', 'CHA'] as const;
-export const PLAYER_STAT_POINTS = 24;
+export const PLAYER_STAT_POINTS = 15;
 export const PLAYER_STAT_MIN = 1;
 export const PLAYER_STAT_MAX = 9;
 export const PROGRESSION_MAX_STAT = 10;
@@ -78,6 +80,11 @@ export const DEFAULT_SETTINGS: StorySettings = {
   enabled: true,
   semanticEnabled: true,
   semanticConnectionId: '',
+  personaConnectionId: '',
+  commandConnectionId: '',
+  bootstrapConnectionId: '',
+  oocCommandsEnabled: true,
+  autoBootstrapExistingChat: true,
   semanticTemperature: 0.1,
   recentMessageCount: 18,
   proseGuardMode: 'review',

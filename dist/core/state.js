@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, HP_RANGE_BY_RANK, MAX_AUDITS, MAX_MEMORY_FACTS, MAX_NPCS, MAX_USED_NAMES, STATE_VERSION, RANK_STATS } from './config.js';
+import { DEFAULT_SETTINGS, HP_RANGE_BY_RANK, MAX_AUDITS, MAX_COMMAND_AUDITS, MAX_MEMORY_FACTS, MAX_NPCS, MAX_USED_NAMES, STATE_VERSION, RANK_STATS } from './config.js';
 import { TurnRng } from './rng.js';
 const blankStats = () => ({ PHY: 1, MND: 1, CHA: 1 });
 export function createDefaultState() {
@@ -19,6 +19,8 @@ export function createDefaultState() {
             pendingBoundary: { active: false, boundaryId: '', targetNpc: '', type: '', warnings: 0, threshold: 1, setTurn: 0, lastTurn: 0 },
             rapportClocks: {}, worldArcs: [],
         },
+        bootstrap: { status: 'none', sourceMessageCount: 0 },
+        commandHistory: [],
         pending: null,
         lastResolution: null,
         audits: [],
@@ -35,6 +37,11 @@ export function normalizeSettings(value) {
         enabled: bool(src.enabled, DEFAULT_SETTINGS.enabled),
         semanticEnabled: bool(src.semanticEnabled, DEFAULT_SETTINGS.semanticEnabled),
         semanticConnectionId: text(src.semanticConnectionId),
+        personaConnectionId: text(src.personaConnectionId),
+        commandConnectionId: text(src.commandConnectionId),
+        bootstrapConnectionId: text(src.bootstrapConnectionId),
+        oocCommandsEnabled: bool(src.oocCommandsEnabled, DEFAULT_SETTINGS.oocCommandsEnabled),
+        autoBootstrapExistingChat: bool(src.autoBootstrapExistingChat, DEFAULT_SETTINGS.autoBootstrapExistingChat),
         semanticTemperature: clampNum(src.semanticTemperature, 0, 2, DEFAULT_SETTINGS.semanticTemperature),
         recentMessageCount: Math.round(clampNum(src.recentMessageCount, 4, 50, DEFAULT_SETTINGS.recentMessageCount)),
         proseGuardMode: ['off', 'review', 'automatic'].includes(String(src.proseGuardMode)) ? src.proseGuardMode : DEFAULT_SETTINGS.proseGuardMode,
@@ -75,6 +82,7 @@ export function normalizeState(value) {
     const economy = object(src.economy);
     const names = object(src.names);
     const continuity = object(src.continuity);
+    const bootstrap = object(src.bootstrap);
     const boundCompanion = object(continuity.boundCompanion);
     const pendingBoundary = object(continuity.pendingBoundary);
     return {
@@ -114,6 +122,14 @@ export function normalizeState(value) {
             rapportClocks: normalizeRapportClocks(continuity.rapportClocks),
             worldArcs: Array.isArray(continuity.worldArcs) ? continuity.worldArcs.slice(-120) : [],
         },
+        bootstrap: {
+            status: ['none', 'importing', 'ready', 'failed'].includes(String(bootstrap.status)) ? bootstrap.status : 'none',
+            sourceMessageCount: Math.max(0, Math.floor(num(bootstrap.sourceMessageCount, 0))),
+            importedAt: num(bootstrap.importedAt, 0) || undefined,
+            lastMessageId: text(bootstrap.lastMessageId) || undefined,
+            error: text(bootstrap.error) || undefined,
+        },
+        commandHistory: Array.isArray(src.commandHistory) ? src.commandHistory.slice(-MAX_COMMAND_AUDITS).filter(Boolean) : [],
         pending: src.pending && typeof src.pending === 'object' ? src.pending : null,
         lastResolution: src.lastResolution && typeof src.lastResolution === 'object' ? src.lastResolution : null,
         audits: Array.isArray(src.audits) ? src.audits.slice(-MAX_AUDITS) : [],
@@ -147,7 +163,7 @@ export function ensureNpc(state, name, rank = 'Average', role = 'NPC', seed = ''
             stats[mainStat] = Math.max(stats[mainStat], hi);
         npc = state.npcs[clean] = {
             name: clean, role, rank, stats, bond: 0, fear: 0, hostility: 0, disposition: 'neutral', status: 'active', companion: false,
-            powerActor: false, romanceStage: 'none', intimacy: 0, boundary: null, notes: [], gear: [], currency: [], introducedTurn: state.turn, lastSeenTurn: state.turn,
+            powerActor: false, romanceStage: 'none', intimacy: 0, boundary: null, notes: [], gear: [], currency: [], relationshipDescriptors: [], introducedTurn: state.turn, lastSeenTurn: state.turn,
             lootSearchCompleted: false,
         };
     }
@@ -165,6 +181,7 @@ export function ensureNpc(state, name, rank = 'Average', role = 'NPC', seed = ''
 }
 export function pruneState(state) {
     state.audits = state.audits.slice(-MAX_AUDITS);
+    state.commandHistory = state.commandHistory.slice(-MAX_COMMAND_AUDITS);
     state.world.facts = dedupeFacts(state.world.facts).slice(-MAX_MEMORY_FACTS);
     state.names.used = [...new Set(state.names.used.map(x => x.trim()).filter(Boolean))].slice(-MAX_USED_NAMES);
     state.continuity.latentFavors = state.continuity.latentFavors.slice(-120);
@@ -195,9 +212,10 @@ function normalizeNpc(name, value) {
     const src = object(value);
     const stats = object(src.stats);
     const rank = ['Weak', 'Average', 'Trained', 'Elite', 'Boss'].includes(String(src.rank)) ? src.rank : 'Average';
+    const midpoint = Math.round((RANK_STATS[rank].min + RANK_STATS[rank].max) / 2);
     return {
         name: text(src.name) || text(name), role: text(src.role) || 'NPC', rank,
-        stats: { PHY: clampInt(stats.PHY, 1, 14, 1), MND: clampInt(stats.MND, 1, 14, 1), CHA: clampInt(stats.CHA, 1, 14, 1) },
+        stats: { PHY: clampInt(stats.PHY, 1, 14, midpoint), MND: clampInt(stats.MND, 1, 14, midpoint), CHA: clampInt(stats.CHA, 1, 14, midpoint) },
         bond: clampInt(src.bond, 0, 4, 0), fear: clampInt(src.fear, 0, 4, 0), hostility: clampInt(src.hostility, 0, 4, 0),
         disposition: text(src.disposition) || 'neutral', status: ['active', 'inactive', 'dead'].includes(String(src.status)) ? src.status : 'active',
         companion: bool(src.companion, false), powerActor: bool(src.powerActor, false),
@@ -206,7 +224,7 @@ function normalizeNpc(name, value) {
         lastSocialTactic: text(src.lastSocialTactic) || undefined, lastSocialGoal: text(src.lastSocialGoal) || undefined,
         notes: stringList(src.notes).slice(-20), gear: stringList(src.gear),
         currency: Array.isArray(src.currency) ? src.currency : [], introducedTurn: Math.max(0, Math.floor(num(src.introducedTurn, 0))), lastSeenTurn: Math.max(0, Math.floor(num(src.lastSeenTurn, 0))),
-        lootSearchCompleted: bool(src.lootSearchCompleted, false), personalityArchetype: text(src.personalityArchetype) || undefined, personalitySummary: text(src.personalitySummary) || undefined,
+        lootSearchCompleted: bool(src.lootSearchCompleted, false), personalityArchetype: text(src.personalityArchetype) || undefined, personalitySummary: text(src.personalitySummary) || undefined, relationshipDescriptors: stringList(src.relationshipDescriptors).slice(0, 16),
     };
 }
 function normalizeReputation(value) {

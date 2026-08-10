@@ -62,34 +62,69 @@ export function updateRelationships(state, semantic, rolls, seed) {
         // Initial impression is contextual rather than a hardcoded race stereotype: the semantic
         // referee already knows whether this actor is helped, opposed, harmed, or directly engaged.
         if (!existed) {
-            if (actor.relation === 'benefited') {
-                npc.bond = 1;
-                change = `positive initial impression for ${npc.name}`;
+            const explicitInitial = actor.initialBond != null || actor.initialFear != null || actor.initialHostility != null || actor.initialRomanceStage != null || actor.initialIntimacy != null || Boolean(actor.relationshipContext) || Boolean(actor.initialRelationshipDescriptors?.length);
+            if (actor.initialBond != null)
+                npc.bond = actor.initialBond;
+            if (actor.initialFear != null)
+                npc.fear = actor.initialFear;
+            if (actor.initialHostility != null)
+                npc.hostility = actor.initialHostility;
+            if (actor.initialRomanceStage)
+                npc.romanceStage = actor.initialRomanceStage;
+            if (actor.initialIntimacy != null)
+                npc.intimacy = actor.initialIntimacy;
+            if (actor.personalityArchetype)
+                npc.personalityArchetype = actor.personalityArchetype;
+            if (actor.personalitySummary)
+                npc.personalitySummary = actor.personalitySummary;
+            if (actor.initialNotes?.length)
+                npc.notes = [...npc.notes, ...actor.initialNotes].slice(-20);
+            if (actor.relationshipContext)
+                npc.notes = [...npc.notes, `Established relationship: ${actor.relationshipContext}`].slice(-20);
+            if (actor.initialRelationshipDescriptors?.length)
+                npc.relationshipDescriptors = mergeDescriptors(npc.relationshipDescriptors, actor.initialRelationshipDescriptors);
+            if (explicitInitial)
+                change = `established starting relationship/traits loaded for ${npc.name}`;
+            if (!explicitInitial) {
+                if (actor.relation === 'benefited') {
+                    npc.bond = 1;
+                    change = `positive initial impression for ${npc.name}`;
+                }
+                else if (actor.relation === 'opposed') {
+                    npc.hostility = 1;
+                    change = `adverse initial impression for ${npc.name}`;
+                }
+                else if (actor.relation === 'harmed') {
+                    npc.hostility = 2;
+                    npc.fear = 1;
+                    change = `hostile initial impression for ${npc.name}`;
+                }
+                // Fame/infamy is location-scoped influence, not a universal morality meter. New local
+                // NPCs may begin with a small deterministic bias once the user's standing is notable.
+                const rep = state.reputation.find(r => r.location.toLowerCase() === state.world.location.toLowerCase());
+                if (rep) {
+                    if (rep.fame >= 3)
+                        npc.bond += rep.fame >= 8 ? 2 : 1;
+                    if (rep.infamy >= 3)
+                        npc.hostility += rep.infamy >= 8 ? 2 : 1;
+                    if (rep.fear >= 3)
+                        npc.fear += rep.fear >= 8 ? 2 : 1;
+                    if (rep.infamy >= 6)
+                        npc.hostility += 1;
+                    if (rep.fame >= 3 || rep.infamy >= 3 || rep.fear >= 3)
+                        change = `local reputation influenced ${npc.name}'s initial impression`;
+                }
             }
-            else if (actor.relation === 'opposed') {
-                npc.hostility = 1;
-                change = `adverse initial impression for ${npc.name}`;
-            }
-            else if (actor.relation === 'harmed') {
-                npc.hostility = 2;
-                npc.fear = 1;
-                change = `hostile initial impression for ${npc.name}`;
-            }
-            // Fame/infamy is location-scoped influence, not a universal morality meter. New local
-            // NPCs may begin with a small deterministic bias once the user's standing is notable.
-            const rep = state.reputation.find(r => r.location.toLowerCase() === state.world.location.toLowerCase());
-            if (rep) {
-                if (rep.fame >= 3)
-                    npc.bond += rep.fame >= 8 ? 2 : 1;
-                if (rep.infamy >= 3)
-                    npc.hostility += rep.infamy >= 8 ? 2 : 1;
-                if (rep.fear >= 3)
-                    npc.fear += rep.fear >= 8 ? 2 : 1;
-                if (rep.infamy >= 6)
-                    npc.hostility += 1;
-                if (rep.fame >= 3 || rep.infamy >= 3 || rep.fear >= 3)
-                    change = `local reputation influenced ${npc.name}'s initial impression`;
-            }
+        }
+        else {
+            if (actor.personalityArchetype && !npc.personalityArchetype)
+                npc.personalityArchetype = actor.personalityArchetype;
+            if (actor.personalitySummary && !npc.personalitySummary)
+                npc.personalitySummary = actor.personalitySummary;
+            if (actor.initialRelationshipDescriptors?.length)
+                npc.relationshipDescriptors = mergeDescriptors(npc.relationshipDescriptors, actor.initialRelationshipDescriptors);
+            if (actor.relationshipContext && !npc.notes.some(n => n === `Established relationship: ${actor.relationshipContext}`))
+                npc.notes = [...npc.notes, `Established relationship: ${actor.relationshipContext}`].slice(-20);
         }
         if (actor.relation === 'harmed' || (relevant && action?.harmful && positive)) {
             npc.hostility += strong ? 2 : 1;
@@ -163,7 +198,15 @@ export function standingInfluence(state, npcName) {
 export function relationshipSummary(npc) {
     const romance = npc.romanceStage !== 'none' ? `; romance ${npc.romanceStage}/I${npc.intimacy}` : '';
     const boundary = npc.boundary?.active ? `; boundary ${npc.boundary.kind}` : '';
-    return `${npc.name}: ${npc.disposition}; B${npc.bond}/F${npc.fear}/H${npc.hostility}${romance}${boundary}; ${npc.companion ? 'companion' : npc.role}`;
+    const descriptors = npc.relationshipDescriptors?.length ? `; relationships [${npc.relationshipDescriptors.join(', ')}]` : '';
+    return `${npc.name}: ${npc.disposition}; B${npc.bond}/F${npc.fear}/H${npc.hostility}${romance}${boundary}${descriptors}; ${npc.companion ? 'companion' : npc.role}`;
 }
+function mergeDescriptors(existing, incoming) { const out = [...(existing || [])]; const seen = new Set(out.map(x => x.toLowerCase())); for (const raw of incoming) {
+    const v = String(raw || '').trim().slice(0, 100);
+    if (v && !seen.has(v.toLowerCase())) {
+        out.push(v);
+        seen.add(v.toLowerCase());
+    }
+} return out.slice(-16); }
 function isPositive(tier) { return ['Success', 'Minor_Success', 'Moderate_Success', 'Critical_Success'].includes(tier); }
 function clamp(v, min, max) { return Math.max(min, Math.min(max, Math.round(v))); }
