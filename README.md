@@ -23,7 +23,7 @@ This is not a compatibility shim and does not load SillyTavern APIs. It is split
 - player creation with live 15-point budget validation;
 - AI conversion of the active Lumiverse persona into a separate new Story Engine persona without overwriting the source;
 - automatic attachment to established chats by reading canonical saved history and reconstructing Story Engine state;
-- 15-point PHY/MND/CHA stat buy; new characters receive exactly one ability and exactly one starting spell only when MND is 7 or higher; persona conversion preserves established abilities/spells;
+- 15-point PHY/MND/CHA stat buy; new characters receive exactly one ability and up to one optional starting spell/power with no stat requirement; persona conversion preserves established abilities/spells;
 - XP milestones, stat growth, generated ability/spell options and hidden-health growth;
 - unique name generator with multiple style families and a per-chat used-name ledger;
 - narrator handoff injected as a native Lumiverse Prompt Breakdown entry;

@@ -4,7 +4,7 @@ This is the implementation checklist for the clean-room Lumiverse remake. “Nat
 
 | Upstream behavior/system | Lumiverse implementation | Notes / improvement |
 |---|---|---|
-| Player creation | `core/character.ts`, Character UI | **15-point** PHY/MND/CHA buy by project choice (the upstream currently uses 24); live remaining-points validation and blocked submit until the budget is exact. New characters receive exactly one activated ability; they receive exactly one starting spell only at MND 7+, matching the upstream creation contract. |
+| Player creation | `core/character.ts`, Character UI | **15-point** PHY/MND/CHA buy by project choice (the upstream currently uses 24); live remaining-points validation and blocked submit until the budget is exact. New characters receive exactly one activated ability; they may receive one optional starting spell/power with no MND requirement when their concept/request supports it (a deliberate Lumiverse-port balance change). |
 | Existing-persona conversion | `core/character.ts`, Personas API | Reads the selected Lumiverse persona, preserves explicit identity/powers/resources, supports up to 24 abilities and 5 spells, creates a separate Story Engine persona and switches to it without overwriting the source. |
 | Character identity/detail contract | `core/character.ts`, `shared/types.ts` | Race, nonhuman flag, gender, age, bloodline, origin, prior role/training, appearance, natural weapons, abilities, spells, inventory, currency, gear and anchors are first-class fields. |
 | Existing-chat bootstrap | `core/commands.ts`, backend history importer | Reads canonical saved history and reconstructs player/NPC/world/relationship/continuity state when attached to an ongoing RP. |

@@ -58,9 +58,9 @@ assert.ok(validateCharacterInput({name:'Too strong',race:'Human',genre:'Fantasy'
 
 // New-character identity/stat choices are locked to the user's 15-point form; the assistant cannot silently rewrite them.
 const lockedSheet=normalizeCharacterSheet({name:'Wrong Name',race:'Elf',genre:'Cyberpunk',appearance:'Generated',stats:{PHY:9,MND:9,CHA:9},naturalWeapons:[],abilities:['Roadcraft — finds practical routes'],spells:['Illegal spell'],inventory:[],currency:[],gear:[],anchors:[],concept:'',backstory:''},{name:'Chosen Name',race:'Human',genre:'Fantasy',concept:'Traveler',appearance:'',backstory:'',stats:{PHY:6,MND:5,CHA:4}},'new');
-assert.equal(lockedSheet.name,'Chosen Name');assert.equal(lockedSheet.race,'Human');assert.equal(lockedSheet.genre,'Fantasy');assert.deepEqual(lockedSheet.stats,{PHY:6,MND:5,CHA:4});assert.deepEqual(lockedSheet.spells,[]);
+assert.equal(lockedSheet.name,'Chosen Name');assert.equal(lockedSheet.race,'Human');assert.equal(lockedSheet.genre,'Fantasy');assert.deepEqual(lockedSheet.stats,{PHY:6,MND:5,CHA:4});assert.deepEqual(lockedSheet.spells,['Illegal spell'],'a starting spell/power is allowed regardless of MND when the concept/assistant supplies one');
 assert.deepEqual(lockedSheet.anchors,[],'new-character assistant must not invent continuity anchors when the user supplied none');
-assert.equal(characterTool('new',{PHY:4,MND:7,CHA:4}).parameters.properties.spells.minItems,1);
+assert.equal(characterTool('new',{PHY:9,MND:1,CHA:5}).parameters.properties.spells.minItems,0);assert.equal(characterTool('new',{PHY:9,MND:1,CHA:5}).parameters.properties.spells.maxItems,1,'starting spell/power must have no MND requirement');
 const convertedSheet=normalizeConvertedPersonaSheet({name:'Veteran',race:'Human',genre:'Fantasy',appearance:'',stats:{PHY:6,MND:5,CHA:4},naturalWeapons:[],abilities:['A','B','C'],spells:['S1','S2'],inventory:[],currency:[],gear:[],anchors:[],concept:'',backstory:''},{name:'Veteran',description:''});
 assert.deepEqual(convertedSheet.abilities,['A','B','C']);assert.deepEqual(convertedSheet.spells,['S1','S2']);
 

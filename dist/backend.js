@@ -53,27 +53,21 @@ async function quietForUser(input, userId) {
         throw err;
     }
 }
-async function getActivePersonaForUser(userId) {
-    try {
-        const persona = await spindle.personas.getActive();
-        if (persona) {
-            if (userId)
-                activePersonaByUser.set(userId, persona);
-            return persona;
-        }
-        // A transient null must not erase a persona id learned from the frontend's
-        // activePersonaId setting or PERSONA_CHANGED event.
-        if (userId && activePersonaByUser.has(userId))
-            return activePersonaByUser.get(userId) ?? null;
-        return null;
-    }
-    catch {
-        return userId && activePersonaByUser.has(userId) ? activePersonaByUser.get(userId) ?? null : null;
-    }
+function extraArgRejected(err) {
+    return /(?:too many|unexpected|unknown|unrecognized|additional|invalid|expected).*argument|argument.*(?:unexpected|unknown|invalid|expected)|takes?\s+\d+.*argument/i.test(errorMessage(err));
 }
 async function getPersonaForUser(personaId, userId) {
     if (!personaId)
         return null;
+    if (userId) {
+        try {
+            return await spindle.personas.get(personaId, userId);
+        }
+        catch (err) {
+            if (!extraArgRejected(err) && !/userId/i.test(errorMessage(err)))
+                return null;
+        }
+    }
     try {
         return await spindle.personas.get(personaId);
     }
@@ -81,21 +75,88 @@ async function getPersonaForUser(personaId, userId) {
         return null;
     }
 }
+async function getActivePersonaForUser(userId, hintPersonaId = '') {
+    const hinted = String(hintPersonaId || '').trim();
+    if (hinted) {
+        const byId = await getPersonaForUser(hinted, userId);
+        if (byId) {
+            if (userId)
+                activePersonaByUser.set(userId, byId);
+            return byId;
+        }
+    }
+    try {
+        // Real operator-scoped Lumiverse runtimes can require the originating user
+        // even though the generic Persona docs show getActive() without parameters.
+        const persona = userId ? await spindle.personas.getActive(userId) : await spindle.personas.getActive();
+        if (persona) {
+            if (userId)
+                activePersonaByUser.set(userId, persona);
+            return persona;
+        }
+    }
+    catch (err) {
+        if (userId && extraArgRejected(err)) {
+            try {
+                const persona = await spindle.personas.getActive();
+                if (persona) {
+                    activePersonaByUser.set(userId, persona);
+                    return persona;
+                }
+            }
+            catch { }
+        }
+    }
+    // A transient null must not erase a persona learned from the frontend's
+    // activePersonaId setting or PERSONA_CHANGED event.
+    return userId && activePersonaByUser.has(userId) ? activePersonaByUser.get(userId) ?? null : null;
+}
 async function createPersonaForUser(input, userId) {
+    if (userId) {
+        try {
+            return await spindle.personas.create(input, userId);
+        }
+        catch (err) {
+            if (!extraArgRejected(err))
+                throw err;
+        }
+    }
     return spindle.personas.create(input);
 }
 async function switchActivePersonaForUser(personaId, userId) {
-    await spindle.personas.switchActive(personaId);
+    if (userId) {
+        try {
+            await spindle.personas.switchActive(personaId, userId);
+        }
+        catch (err) {
+            if (extraArgRejected(err))
+                await spindle.personas.switchActive(personaId);
+            else
+                throw err;
+        }
+    }
+    else
+        await spindle.personas.switchActive(personaId);
     if (userId) {
         if (personaId) {
             const p = await getPersonaForUser(personaId, userId);
-            activePersonaByUser.set(userId, p);
+            if (p)
+                activePersonaByUser.set(userId, p);
         }
         else
             activePersonaByUser.set(userId, null);
     }
 }
 async function updatePersonaForUser(personaId, input, userId) {
+    if (userId) {
+        try {
+            return await spindle.personas.update(personaId, input, userId);
+        }
+        catch (err) {
+            if (!extraArgRejected(err))
+                throw err;
+        }
+    }
     return spindle.personas.update(personaId, input);
 }
 async function loadSettings(userId) {
@@ -898,10 +959,29 @@ async function activeChatId(userId, hint = '') {
     return userId ? activeChatByUser.get(userId) || '' : '';
 }
 function mapConnections(raw) { return raw.map((c) => ({ id: String(c.id || c.connection_id || ''), name: String(c.name || c.label || c.model || c.id || 'Connection'), provider: String(c.provider || ''), model: String(c.model || ''), isDefault: Boolean(c.is_default), hasApiKey: c.has_api_key !== false })).filter(c => c.id); }
-async function dashboardPayload(userId, hint = '') {
+async function dashboardPayload(userId, hint = '', personaHint = '') {
     const settings = await loadSettings(userId);
     const chatId = await activeChatId(userId, hint);
     const state = chatId ? await loadState(chatId) : createDefaultState();
+    let liveMessageCount;
+    let liveLastMessageId = '';
+    // Recover from an early attach that saw only the greeting/first message before
+    // the full chat was available. Once a real import (3+ messages) or Story Engine
+    // turns exist, we do not automatically invalidate completed state.
+    if (chatId && has('chat_mutation') && (state.bootstrap.status !== 'ready' || state.bootstrap.sourceMessageCount < 3)) {
+        try {
+            const live = await spindle.chat.getMessages(chatId);
+            liveMessageCount = Array.isArray(live) ? live.length : 0;
+            liveLastMessageId = String(Array.isArray(live) && live.length ? live[live.length - 1]?.id || '' : '');
+            if (state.bootstrap.status === 'ready' && state.bootstrap.sourceMessageCount < 3 && liveMessageCount >= 3 && state.turn === 0 && state.audits.length === 0) {
+                state.bootstrap = { status: 'none', sourceMessageCount: liveMessageCount, lastMessageId: liveLastMessageId || undefined };
+                await saveState(chatId, state);
+            }
+        }
+        catch (err) {
+            spindle.log?.warn?.(`Story Engine live history check failed for ${chatId}: ${String(err)}`);
+        }
+    }
     let connections = [];
     try {
         const r = await spindle.connections.list(userId || undefined);
@@ -910,13 +990,25 @@ async function dashboardPayload(userId, hint = '') {
     catch { }
     let persona = null;
     try {
-        persona = await getActivePersonaForUser(userId);
+        persona = await getActivePersonaForUser(userId, personaHint);
     }
     catch { }
-    return { type: 'dashboard', chatId, settings, state, connections: mapConnections(connections), capabilities: { chats: has('chats'), chatMutation: has('chat_mutation'), generation: has('generation'), personas: has('personas') }, activePersona: persona ? { id: persona.id, name: persona.name, title: persona.title, description: persona.description } : null };
+    let chatInfo = null;
+    try {
+        if (chatId)
+            chatInfo = await spindle.chats.get(chatId, userId || undefined);
+    }
+    catch {
+        try {
+            if (chatId)
+                chatInfo = await spindle.chats.get(chatId);
+        }
+        catch { }
+    }
+    return { type: 'dashboard', chatId, chatInfo: chatInfo ? { id: chatInfo.id, name: chatInfo.name, characterId: chatInfo.character_id } : null, liveMessageCount, liveLastMessageId, personaHintId: String(personaHint || ''), settings, state, connections: mapConnections(connections), capabilities: { chats: has('chats'), chatMutation: has('chat_mutation'), generation: has('generation'), personas: has('personas') }, activePersona: persona ? { id: persona.id, name: persona.name, title: persona.title, description: persona.description } : null };
 }
-async function sendDashboard(userId, hint = '', _scheduleBootstrap = true) {
-    const payload = await dashboardPayload(userId, hint);
+async function sendDashboard(userId, hint = '', _scheduleBootstrap = true, personaHint = '') {
+    const payload = await dashboardPayload(userId, hint, personaHint);
     if (userId)
         spindle.sendToFrontend(payload, userId);
     else
@@ -985,14 +1077,14 @@ function registerFrontend() {
                     activePersonaByUser.set(userId, hinted);
             }
             if (type === 'get_dashboard') {
-                await sendDashboard(userId, hint);
+                await sendDashboard(userId, hint, true, personaHint);
                 return;
             }
             if (type === 'save_settings') {
                 const current = await loadSettings(userId);
                 await saveSettings(normalizeSettings({ ...current, ...object(payload.settings) }), userId);
                 spindle.toast?.success?.('Story Engine settings saved.');
-                await sendDashboard(userId, hint);
+                await sendDashboard(userId, hint, true, personaHint);
                 return;
             }
             const chatId = await activeChatId(userId, hint);
@@ -1079,10 +1171,8 @@ async function handleCreatePlayer(chatId, payload, userId) {
     const sheet = normalizeCharacterSheet(call?.args ?? parseJsonContent(result?.content) ?? {}, input);
     if (sheet.abilities.length !== 1)
         throw new Error('Character assistant must return exactly one starting ability. Try again or choose a different assistant connection.');
-    if (sheet.stats.MND >= 7 && sheet.spells.length !== 1)
-        throw new Error('Character assistant must return exactly one starting spell when MND is 7 or higher.');
-    if (sheet.stats.MND < 7 && sheet.spells.length)
-        throw new Error('Character assistant returned a starting spell even though MND is below 7.');
+    if (sheet.spells.length > 1)
+        throw new Error('Character assistant returned more than one starting spell/power.');
     const state = await loadState(chatId);
     applyPlayerToState(state, sheet);
     await saveState(chatId, state);

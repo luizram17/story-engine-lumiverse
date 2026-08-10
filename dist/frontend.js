@@ -54,34 +54,55 @@ export function setup(ctx) {
             }
         }
         catch { }
+        try {
+            const response = await fetch('/api/v1/settings', { method: 'GET', credentials: 'same-origin', headers: { Accept: 'application/json' } });
+            if (response.ok) {
+                const rows = await response.json();
+                const list = Array.isArray(rows) ? rows : Array.isArray(rows?.data) ? rows.data : [];
+                const row = list.find((x) => String(x?.key || '') === key);
+                let value = row?.value;
+                if (typeof value === 'string') {
+                    const raw = value.trim();
+                    try {
+                        const parsed = JSON.parse(raw);
+                        if (typeof parsed === 'string')
+                            value = parsed;
+                    }
+                    catch { }
+                    const id = String(value || '').trim();
+                    if (id && id !== 'null' && id !== 'undefined')
+                        return id;
+                }
+            }
+        }
+        catch { }
         return '';
     }
     async function readHostActiveChatId() {
-        if (chatHint)
-            return chatHint;
         const id = await readHostSettingId('activeChatId');
         if (id) {
             chatHint = id;
             return id;
         }
-        return String(dashboard?.chatId || '').trim();
+        return chatHint || String(dashboard?.chatId || '').trim();
     }
     async function readHostActivePersonaId() {
-        if (personaHint)
-            return personaHint;
         const id = await readHostSettingId('activePersonaId');
         if (id) {
             personaHint = id;
             return id;
         }
-        return String(dashboard?.activePersona?.id || '').trim();
+        return personaHint || String(dashboard?.activePersona?.id || '').trim();
     }
     async function request(type, extra = {}) {
-        const supplied = String(extra?.chatId || dashboard?.chatId || chatHint || '').trim();
-        const chatId = supplied || await readHostActiveChatId();
-        const suppliedPersona = String(extra?.personaId || dashboard?.activePersona?.id || personaHint || '').trim();
-        const personaId = suppliedPersona || await readHostActivePersonaId();
-        ctx.sendToBackend({ type, ...extra, chatId: String(extra?.chatId || chatId || ''), personaId: String(extra?.personaId || personaId || '') });
+        // Re-read the host's persisted active IDs on every manual UI action. Events are
+        // fast hints, but the persisted settings are authoritative if the extension was
+        // loaded after the user had already opened a chat/selected a persona.
+        const hostChatId = await readHostActiveChatId();
+        const chatId = String(extra?.chatId || hostChatId || dashboard?.chatId || chatHint || '').trim();
+        const hostPersonaId = await readHostActivePersonaId();
+        const personaId = String(extra?.personaId || hostPersonaId || dashboard?.activePersona?.id || personaHint || '').trim();
+        ctx.sendToBackend({ type, ...extra, chatId, personaId });
     }
     function setBusy(value) { busy = value; render(); }
     function render() {
@@ -103,7 +124,7 @@ export function setup(ctx) {
       <main data-main></main>`;
         const main = shell.querySelector('[data-main]');
         if (activeView === 'overview')
-            main.innerHTML = renderOverview(s, settings, p, busy);
+            main.innerHTML = renderOverview(s, settings, p, busy, dashboard);
         else if (activeView === 'character')
             main.innerHTML = renderCharacter(s, p, busy, dashboard.activePersona);
         else if (activeView === 'tracker')
@@ -238,7 +259,7 @@ export function setup(ctx) {
     request('get_dashboard');
     return () => { unsubBackend(); unsubGen(); unsubChat(); unsubChatChanged(); unsubMessageSent(); unsubUserRendered(); unsubCharacterRendered(); unsubSettings(); unsubPersona(); unsubActivate(); unsubAction(); inputAction.destroy(); widget?.destroy?.(); tab.destroy(); removeStyle(); ctx.dom.cleanup(); };
 }
-function renderOverview(s, settings, p, busy) {
+function renderOverview(s, settings, p, busy, dashboard) {
     const h = s.health?.user;
     const pending = s.proseReview;
     return `
@@ -248,7 +269,8 @@ function renderOverview(s, settings, p, busy) {
     <div class="se-kpi"><span class="se-muted">Progression</span><b>Lv ${esc(s.progression?.level || 1)}</b><span class="se-muted">${esc(s.progression?.xp || 0)} XP · ${esc(s.progression?.pendingMilestones || 0)} pending</span></div>
   </div><div class="se-row"><button class="se-btn" data-refresh>Refresh</button><span class="se-chip">${s.bootstrap?.status === 'importing' ? 'attaching history…' : s.bootstrap?.status === 'failed' ? 'attached · history import needs attention' : 'attached automatically'}</span></div></div></section>
   ${pending ? `<section class="se-section"><header>Prose Guard review</header><div class="se-body"><div class="se-warn">${pending.findings.length} finding(s) in the latest reply. Review mode never edits automatically.</div><div class="se-list">${pending.findings.slice(0, 8).map((f) => `<div class="se-card"><b>${esc(f.category)}</b><div class="se-muted">${esc(f.excerpt)}</div></div>`).join('')}</div><div class="se-row"><button class="se-btn primary" data-apply-prose>Apply minimal repair</button><button class="se-btn" data-dismiss-prose>Dismiss</button></div></div></section>` : ''}
-  ${renderBootstrapStatus(s, busy)}
+  ${renderHostContext(dashboard, s)}
+  ${renderBootstrapStatus(s, busy, dashboard)}
   <section class="se-section"><header>Pipeline</header><div class="se-body"><div class="se-list"><div class="se-card"><b>1 · Semantic preflight</b><div class="se-muted">Fresh stakes only; up to three explicit actions.</div></div><div class="se-card"><b>2 · Deterministic simulation</b><div class="se-muted">Opposed rolls, hidden health, relationships, loot envelope, proactivity, random events, names and world state.</div></div><div class="se-card"><b>3 · Native prompt handoff</b><div class="se-muted">Injected as a visible Prompt Breakdown entry, not DOM/regex glue.</div></div><div class="se-card"><b>4 · Finalization</b><div class="se-muted">Prose guard, continuity archive, reputation, XP and snapshot-safe swipe reconciliation.</div></div></div></div></section>`;
 }
 function renderCharacter(s, p, busy, activePersona) {
@@ -256,7 +278,7 @@ function renderCharacter(s, p, busy, activePersona) {
   <div class="se-grid"><div class="se-field"><label>Name</label><input name="name" value="${attr(p?.name || '')}"></div><div class="se-field"><label>Race</label><select name="race">${options(races, p?.race || 'Human')}</select></div><div class="se-field"><label>Genre</label><select name="genre">${options(genres, p?.genre || 'Fantasy')}</select></div><div class="se-field"><label>Apply result</label><select name="applyMode"><option value="new_persona">Create new persona & select it</option><option value="state_only">Story Engine state only</option></select></div></div>
   <div class="se-grid"><div class="se-field"><label>Age (optional)</label><input type="number" min="1" name="age" value="${attr(p?.age || '')}"></div><div class="se-field"><label>Gender (optional)</label><input name="gender" value="${attr(p?.gender || '')}"></div><div class="se-field"><label>Bloodline (optional)</label><input name="bloodline" value="${attr(p?.bloodline || '')}"></div><div class="se-field"><label>Origin (optional)</label><input name="origin" value="${attr(p?.origin || '')}"></div><div class="se-field"><label>Prior role / training (optional)</label><input name="priorRoleOrTraining" value="${attr(p?.priorRoleOrTraining || '')}"></div></div>
   <div><div class="se-between"><div class="se-muted">Point buy · exactly 15 points, each 1–9</div><div class="se-pointbuy" data-pointbuy>15 / 15 points</div></div><div class="se-grid-3">${['PHY', 'MND', 'CHA'].map(k => `<div class="se-field"><label>${k}</label><input data-stat-buy type="number" min="1" max="9" step="1" name="${k}" value="${attr(p?.stats?.[k] ?? 5)}"></div>`).join('')}</div></div>
-  ${fieldArea('concept', 'Concept', p?.concept || '')}${fieldArea('appearance', 'Appearance', p?.appearance || '')}${fieldArea('backstory', 'Backstory', p?.backstory || '')}${fieldArea('desiredAbilities', 'Desired abilities', p?.abilities?.join('\n') || '')}${fieldArea('desiredSpells', 'Desired spell idea (used only when MND ≥ 7)', p?.spells?.join('\n') || '')}${fieldArea('inventory', 'Inventory / gear ideas', [...(p?.inventory || []), ...(p?.gear || [])].join('\n'))}${fieldArea('anchors', 'Character anchors', p?.anchors?.join('\n') || '')}
+  ${fieldArea('concept', 'Concept', p?.concept || '')}${fieldArea('appearance', 'Appearance', p?.appearance || '')}${fieldArea('backstory', 'Backstory', p?.backstory || '')}${fieldArea('desiredAbilities', 'Desired abilities', p?.abilities?.join('\n') || '')}${fieldArea('desiredSpells', 'Desired starting spell / power (optional · no MND requirement)', p?.spells?.join('\n') || '')}${fieldArea('inventory', 'Inventory / gear ideas', [...(p?.inventory || []), ...(p?.gear || [])].join('\n'))}${fieldArea('anchors', 'Character anchors', p?.anchors?.join('\n') || '')}
   <button type="button" class="se-btn primary" data-create-player ${busy === 'player' ? 'disabled' : ''}>${busy === 'player' ? 'Working…' : 'Generate & apply sheet'}</button>
   </form></div></section>
   <section class="se-section"><header>AI persona conversion</header><div class="se-body"><div class="se-card"><b>${esc(activePersona?.name || 'No active persona')}</b><div class="se-muted">${esc(activePersona?.title || '')}</div></div><div class="se-muted">The assistant reads the currently selected Lumiverse persona, converts it to a grounded 15-point Story Engine sheet, creates a separate new persona, and selects the new copy. The original persona is never overwritten.</div><button type="button" class="se-btn primary" data-convert-persona ${!activePersona || busy === 'persona' ? 'disabled' : ''}>${busy === 'persona' ? 'Converting…' : 'Convert active persona with AI'}</button></div></section>`;
@@ -319,12 +341,14 @@ function renderSettings(s, connections) {
   <div class="se-row"><button type="button" class="se-btn primary" data-save-settings>Save settings</button><button type="button" class="se-btn danger" data-reset>Reset this chat state</button></div>
   </form></div></section>`;
 }
-function renderBootstrapStatus(s, busy) { const b = s.bootstrap || { status: 'none', sourceMessageCount: 0 }; if (b.status === 'importing' || busy === 'history')
-    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-warn">Importing the existing conversation history… ${esc(b.sourceMessageCount || '')} stored message(s) detected.</div></div></section>`; if (b.status === 'ready') {
+function renderHostContext(dashboard, s) { const chat = dashboard?.chatInfo; const persona = dashboard?.activePersona; const count = Number.isFinite(Number(dashboard?.liveMessageCount)) ? Number(dashboard.liveMessageCount) : Number(s?.bootstrap?.sourceMessageCount || 0); return `<section class="se-section"><header>Lumiverse context</header><div class="se-body"><div class="se-grid"><div class="se-card"><b>Chat</b><div>${esc(chat?.name || dashboard?.chatId || 'Not detected')}</div><div class="se-muted">${dashboard?.chatId ? `id ${esc(dashboard.chatId)} · ${esc(count)} known canonical message(s)` : 'No active chat id received from Lumiverse.'}</div></div><div class="se-card"><b>Active persona</b><div>${esc(persona?.name || 'Not detected')}</div><div class="se-muted">${persona?.id ? `id ${esc(persona.id)}` : dashboard?.personaHintId ? `Lumiverse reported persona id ${esc(dashboard.personaHintId)}, but the backend could not resolve it.` : 'No activePersonaId was received.'}</div></div></div></div></section>`; }
+function renderBootstrapStatus(s, busy, dashboard) { const b = s.bootstrap || { status: 'none', sourceMessageCount: 0 }; const live = Number.isFinite(Number(dashboard?.liveMessageCount)) ? Number(dashboard.liveMessageCount) : null; const observed = live ?? Number(b.sourceMessageCount || 0); if (b.status === 'importing' || busy === 'history')
+    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-warn">Importing the existing conversation history… ${esc(observed)} canonical message(s) detected.</div></div></section>`; if (b.status === 'ready') {
     const n = Number(b.sourceMessageCount || 0);
-    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-card"><b>Story Engine attached</b><div class="se-muted">${n < 3 ? `${esc(n)} prior message(s) found; no history reconstruction was necessary.` : `${esc(n)} canonical messages were read to reconstruct Story Engine state.`}</div></div>${n >= 3 ? '<button class="se-btn" data-import-history>Re-import entire history</button>' : ''}</div></section>`;
+    const stale = live != null && live > n && n < 3;
+    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-card"><b>Story Engine attached</b><div class="se-muted">${stale ? `The host currently reports ${esc(live)} canonical messages; the previous ${esc(n)}-message early attach is stale and will be reconstructed.` : n < 3 ? `${esc(n)} canonical message(s) found at attachment time; no reconstruction was necessary.` : `${esc(n)} canonical messages were read to reconstruct Story Engine state.`}</div></div>${n >= 3 || stale ? '<button class="se-btn" data-import-history>Re-import entire history</button>' : ''}</div></section>`;
 } if (b.status === 'failed')
-    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-warn"><b>Attached, but history import needs attention.</b><div class="se-muted">${esc(b.error || 'Unknown error')}</div></div><button class="se-btn" data-import-history>Retry history import</button></div></section>`; return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-muted">Story Engine attaches automatically. If this conversation already contains RP history, it can reconstruct its state from the saved messages.</div><button class="se-btn" data-import-history>Import existing history now</button></div></section>`; }
+    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-warn"><b>Attached, but history import needs attention.</b><div class="se-muted">${esc(b.error || 'Unknown error')}</div></div><button class="se-btn" data-import-history>Retry history import</button></div></section>`; return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-muted">Story Engine attaches automatically. ${live != null ? `Lumiverse currently reports ${esc(live)} canonical message(s) in this chat. ` : ''}If this conversation already contains RP history, it will reconstruct its state from those saved messages.</div><button class="se-btn" data-import-history>Import existing history now</button></div></section>`; }
 function connectionOptions(connections, selected) { return connections.map(c => { const detail = [c.provider, c.model].filter(Boolean).join(' / '); const unavailable = c.hasApiKey === false; const suffix = `${detail ? ' — ' + detail : ''}${c.isDefault ? ' · default' : ''}${unavailable ? ' · no API key' : ''}`; return `<option value="${attr(c.id)}" ${c.id === selected ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${esc(c.name + suffix)}</option>`; }).join(''); }
 function renderAudit(s) { const audits = [...(s.audits || [])].reverse(); return `<section class="se-section"><header>Turn audit</header><div class="se-body"><div class="se-muted">Mechanical results are visible here for debugging, never injected into final prose as numbers.</div><div class="se-list">${audits.length ? audits.map((a) => `<details class="se-card"><summary><b>Turn ${esc(a.turn)}</b> · ${esc(a.summary || '')}</summary><div class="se-code">${esc(JSON.stringify({ rolls: a.rolls, xpAward: a.xpAward, proseFindings: a.proseFindings, notes: a.notes }, null, 2))}</div></details>`).join('') : '<div class="se-muted">No finalized turns yet.</div>'}</div></div></section>`; }
 function fieldArea(name, label, value) { return `<div class="se-field"><label>${esc(label)}</label><textarea name="${attr(name)}">${esc(value)}</textarea></div>`; }

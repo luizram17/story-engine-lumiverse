@@ -66,19 +66,32 @@ globalThis.spindle = {
   on:(name,fn)=>{events.set(name,fn);return()=>events.delete(name);},
   onFrontendMessage:(fn)=>{frontendHandler=fn;},
   sendToFrontend:(payload,userId)=>{lastFrontendPayload=payload;lastFrontendUserId=userId;},
-  chats:{getActive:async(userId)=>{activeChatLookups++;assert.equal(userId,'user-smoke','operator-scoped active chat lookup must receive userId');return{id:'chat-smoke',name:'Smoke'};}},
+  chats:{
+    getActive:async(userId)=>{activeChatLookups++;assert.equal(userId,'user-smoke','operator-scoped active chat lookup must receive userId');return{id:'chat-smoke',name:'Smoke',character_id:'char-smoke'};},
+    get:async(id,userId)=>{assert.equal(id,'chat-smoke');assert.equal(userId,'user-smoke','operator-scoped chat lookup must retain userId');return{id:'chat-smoke',name:'Smoke',character_id:'char-smoke'};},
+  },
   connections:{list:async(userId)=>{connectionListUserId=userId;return[{id:'profile-1',name:'Assistant',provider:'openai',model:'gpt-test',is_default:true,has_api_key:true}];},get:async(id,userId)=>{if(userId)connectionListUserId=userId;return{id,name:'Assistant',provider:'openai',model:'gpt-test',is_default:id==='profile-1',has_api_key:true};}},
   personas:{
-    getActive:async()=>{activePersonaLookups++;return activePersona;},
-    get:async(id)=>createdPersonas.find(p=>p.id===id)|| (activePersona?.id===id?activePersona:null),
-    create:async(input)=>{const p={id:`persona-${createdPersonas.length+1}`,...input};createdPersonas.push(p);return p;},
-    switchActive:async(id)=>{switchedPersonaId=id;if(id){const found=createdPersonas.find(p=>p.id===id);if(found)activePersona=found;}},
-    update:async()=>{personaUpdateCalls++;}
+    getActive:async(userId)=>{activePersonaLookups++;assert.equal(userId,'user-smoke','operator-scoped active persona lookup must receive userId');return activePersona;},
+    get:async(id,userId)=>{assert.equal(userId,'user-smoke','operator-scoped persona get must receive userId');return createdPersonas.find(p=>p.id===id)|| (activePersona?.id===id?activePersona:null);},
+    create:async(input,userId)=>{assert.equal(userId,'user-smoke','operator-scoped persona create must receive userId');const p={id:`persona-${createdPersonas.length+1}`,...input};createdPersonas.push(p);return p;},
+    switchActive:async(id,userId)=>{assert.equal(userId,'user-smoke','operator-scoped persona switch must receive userId');switchedPersonaId=id;if(id){const found=createdPersonas.find(p=>p.id===id);if(found)activePersona=found;}},
+    update:async(_id,_input,userId)=>{assert.equal(userId,'user-smoke','operator-scoped persona update must receive userId');personaUpdateCalls++;}
   },
   chat:{
     updateMessage:async(chatId,messageId,patch)=>{messageUpdates.push({chatId,messageId,patch});},
     appendMessage:async()=>{appendMessageCalls++;return{};},
-    getMessages:async()=>{getMessagesCalls++;return[{id:'h1',role:'user',content:'We arrive in Emberfall.'},{id:'h2',role:'assistant',content:'Mira, your childhood best friend, greets you at the gate.'},{id:'h3',role:'user',content:'I hug Mira.'}];},
+    getMessages:async()=>{getMessagesCalls++;return[
+      {id:'h1',role:'assistant',content:'The road enters Emberfall.'},
+      {id:'h2',role:'user',content:'I look around.'},
+      {id:'h3',role:'assistant',content:'Mira waits near the gate.'},
+      {id:'h4',role:'user',content:'I recognize her.'},
+      {id:'h5',role:'assistant',content:'Mira, your childhood best friend, smiles.'},
+      {id:'h6',role:'user',content:'I ask how she has been.'},
+      {id:'h7',role:'assistant',content:'She tells you about the old map.'},
+      {id:'h8',role:'user',content:'I hug Mira.'},
+      {id:'h9',role:'assistant',content:'She hugs you back.'},
+    ];},
   },
   generate:{
     quiet:async(req,userId)=>{if(forceQuietScopeFailure){forceQuietScopeFailure=false;throw new Error('userId is required for operator-scoped extensions');}return generationResponder(req,userId,false);},
@@ -95,6 +108,9 @@ assert.equal(typeof events.get('GENERATION_ENDED'),'function','backend did not r
 assert.equal(typeof events.get('CHAT_SWITCHED'),'function','backend did not register chat switch tracking');
 assert.equal(typeof events.get('PERSONA_CHANGED'),'function','backend did not register persona-change tracking');
 assert.equal(typeof events.get('SETTINGS_UPDATED'),'function','backend did not register activeChatId settings tracking');
+const {createDefaultState}=await import('../dist/core/state.js');
+const staleAttach=createDefaultState();staleAttach.bootstrap={status:'ready',sourceMessageCount:1,importedAt:Date.now(),lastMessageId:'h1'};
+chatStore.set('chat-smoke|story_engine_state_v10',JSON.stringify(staleAttach));
 await frontendHandler({type:'get_dashboard'},'user-smoke');
 assert.ok(activeChatLookups>0,'dashboard did not resolve the active chat');
 assert.equal(connectionListUserId,'user-smoke','dashboard did not list connections in user scope');
@@ -104,8 +120,11 @@ assert.equal(lastFrontendPayload?.activePersona?.id,'persona-old','dashboard fai
 assert.equal(lastFrontendPayload?.chatId,'chat-smoke');
 assert.equal(lastFrontendPayload?.connections?.[0]?.model,'gpt-test');
 assert.equal(appendMessageCalls,0,'opening/attaching Story Engine must never inject a synthetic Start Adventure message');
+assert.ok(getMessagesCalls>0,'dashboard must verify a suspicious early short-chat attachment against canonical history');
+assert.equal(lastFrontendPayload?.liveMessageCount,9,'dashboard did not expose the live canonical message count');
+let staleState=JSON.parse(chatStore.get('chat-smoke|story_engine_state_v10'));
+assert.equal(staleState.bootstrap.status,'none','a stale 1-message early attach was not invalidated when the chat now contains 9 messages');
 await new Promise(r=>setTimeout(r,5));
-assert.equal(getMessagesCalls,0,'dashboard attachment must not launch history import as a detached backend task');
 
 await frontendHandler({type:'save_settings',chatId:'chat-smoke',settings:{semanticTemperature:0.22}},'user-smoke');
 assert.equal(savedSettingsUserId,'user-smoke','settings were not saved in operator-safe per-user storage');
@@ -151,7 +170,7 @@ forceQuietScopeFailure=true;
 await frontendHandler({type:'import_existing_history'},'user-smoke');
 state=JSON.parse(chatStore.get('chat-smoke|story_engine_state_v10'));
 assert.equal(state.bootstrap.status,'ready');
-assert.equal(state.bootstrap.sourceMessageCount,3);
+assert.equal(state.bootstrap.sourceMessageCount,9);
 assert.equal(state.world.location,'Emberfall');
 assert.equal(state.npcs.Mira.bond,4);
 assert.deepEqual(state.npcs.Mira.relationshipDescriptors,['childhood best friend']);
