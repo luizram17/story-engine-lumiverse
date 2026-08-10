@@ -83,3 +83,7 @@ Current-scene NPC presence is a complete list when the semantic/post-turn assist
 
 ### 17. Redundant active-chat resolution
 Manual UI actions no longer rely on a single backend lookup. Operator-scoped `spindle.chats.getActive(userId)` is authoritative; the frontend independently reads Lumiverse's persisted `activeChatId` setting and forwards chat IDs seen in `CHAT_SWITCHED`, message-render, message-sent, generation, and settings events. A transient null lookup never erases a valid cached hint.
+
+### 18. Operator-scoped user-context preservation
+History import and all LLM sidecars retain the originating Lumiverse user scope. Automatic history bootstrap is frontend-initiated rather than fire-and-forget from a backend dashboard/event callback, so long-running imports cannot outlive and lose the operator user context. Generation lifecycle events also refresh the chat→user mapping before finalization.
+

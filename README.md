@@ -115,3 +115,8 @@ The implementation is designed against the Lumiverse Spindle APIs documented in 
 ## Credits / provenance
 
 Behavioral reference: `ZDOSt/Story-Engine` (SillyTavern extension). This project is a from-scratch Lumiverse implementation rather than a line-for-line copy. Before redistributing publicly, verify the upstream project's current license/redistribution terms and add the appropriate attribution/license files for your intended distribution.
+
+## Operator-scoped runtime notes
+
+Story Engine is designed to work when installed globally/operator-scoped. Per-user preferences are stored in `userStorage`, connection discovery is explicitly scoped to the originating user, and direct sidecar generations preserve that same user scope. History import is never launched as a detached backend task: automatic imports are requested by the frontend so the backend handles them inside a user-scoped frontend command. This avoids `userId is required for operator-scoped extensions` failures during long-running history reconstruction.
+

@@ -28,10 +28,14 @@ catch {
     return false;
 } }
 function errorMessage(err) { return err instanceof Error ? err.message : String(err || ''); }
-async function quietForUser(input, _userId) {
-    // GenerationRequestDTO has a single request argument. User scoping is established by
-    // the originating extension context; Story Engine always supplies an explicit,
-    // user-resolved connection_id for operator-safe sidecar calls.
+async function quietForUser(input, userId) {
+    // Real operator-scoped Lumiverse builds require the originating user context for
+    // direct sidecar generation even when connection_id is explicit. The public docs
+    // currently show quiet(input), while the runtime accepts/needs the scoped second
+    // argument in operator mode. Supplying an extra JS argument is harmless on builds
+    // that infer scope automatically.
+    if (userId)
+        return spindle.generate.quiet(input, userId);
     return spindle.generate.quiet(input);
 }
 async function getActivePersonaForUser(userId) {
@@ -270,7 +274,14 @@ async function bootstrapExistingChat(chatId, userId, force = false) {
         messages = await spindle.chat.getMessages(chatId);
     }
     catch (err) {
+        const msg = `History read failed: ${errorMessage(err)}`;
+        state.bootstrap = { status: 'failed', sourceMessageCount: 0, error: msg };
+        await saveState(chatId, state);
         spindle.log?.warn?.(`History import could not read chat ${chatId}: ${String(err)}`);
+        if (force)
+            spindle.toast?.error?.('Story Engine could not read the existing chat history.');
+        if (userId)
+            await sendDashboard(userId, chatId, false);
         return;
     }
     if (!force && messages.length < 3) {
@@ -286,6 +297,7 @@ async function bootstrapExistingChat(chatId, userId, force = false) {
     await saveState(chatId, state);
     if (userId)
         await sendDashboard(userId, chatId, false);
+    let importStage = 'persona context';
     try {
         let persona = null;
         try {
@@ -294,8 +306,10 @@ async function bootstrapExistingChat(chatId, userId, force = false) {
         catch { }
         const personaContext = persona ? `Name: ${persona.name || ''}\nTitle: ${persona.title || ''}\nDescription:\n${persona.description || ''}` : '';
         const chunks = splitTranscript(messages);
+        importStage = 'connection resolution';
         const bootstrapConnection = requireConnection(await resolveConnectionId(settings.bootstrapConnectionId, settings.semanticConnectionId, '', userId), 'History Import Assistant');
         for (let i = 0; i < chunks.length; i++) {
+            importStage = `assistant generation ${i + 1}/${chunks.length}`;
             const batch = await runMutationAssistant(bootstrapAssistantPrompt(chunks[i], storyDataContext(state), personaContext, i + 1, chunks.length), 'apply_story_history_import', bootstrapConnection, userId);
             const hadPlayer = Boolean(state.player);
             state = applyMutationBatch(state, batch).state;
@@ -311,9 +325,10 @@ async function bootstrapExistingChat(chatId, userId, force = false) {
     }
     catch (err) {
         state = await loadState(chatId);
-        state.bootstrap = { status: 'failed', sourceMessageCount: messages.length, lastMessageId: String(messages.at(-1)?.id || '') || undefined, error: err instanceof Error ? err.message : String(err) };
+        const detail = errorMessage(err);
+        state.bootstrap = { status: 'failed', sourceMessageCount: messages.length, lastMessageId: String(messages.at(-1)?.id || '') || undefined, error: `${importStage}: ${detail}` };
         await saveState(chatId, state);
-        spindle.log?.error?.(`History import failed for ${chatId}: ${String(err)}`);
+        spindle.log?.error?.(`History import failed for ${chatId} during ${importStage}: ${String(err)}`);
         if (force)
             spindle.toast?.error?.('Story Engine could not import the existing chat history. Open Story Engine for details.');
     }
@@ -442,12 +457,15 @@ function registerInterceptor() {
 function registerGenerationEvents() {
     if (generationEventsRegistered || !has('generation'))
         return;
-    spindle.on('GENERATION_STARTED', (payload) => { if (payload?.chatId && payload?.generationId)
-        pendingGenerationByChat.set(String(payload.chatId), String(payload.generationId)); });
-    spindle.on('GENERATION_STOPPED', async (payload) => {
+    spindle.on('GENERATION_STARTED', (payload, userId) => { const chatId = String(payload?.chatId || ''); if (chatId && userId)
+        userForChat(chatId, userId); if (chatId && payload?.generationId)
+        pendingGenerationByChat.set(chatId, String(payload.generationId)); });
+    spindle.on('GENERATION_STOPPED', async (payload, userId) => {
         const chatId = String(payload?.chatId || '');
         if (!chatId)
             return;
+        if (userId)
+            userForChat(chatId, userId);
         const state = await loadState(chatId);
         if (state.pending) {
             state.pending = null;
@@ -455,16 +473,18 @@ function registerGenerationEvents() {
         }
         pendingGenerationByChat.delete(chatId);
     });
-    spindle.on('GENERATION_ENDED', async (payload) => {
+    spindle.on('GENERATION_ENDED', async (payload, userId) => {
         const chatId = String(payload?.chatId || '');
         const messageId = String(payload?.messageId || '');
+        if (chatId && userId)
+            userForChat(chatId, userId);
         if (!chatId || !messageId || payload?.error) {
             if (chatId)
                 pendingGenerationByChat.delete(chatId);
             return;
         }
         try {
-            await finalizeGeneration(chatId, messageId, String(payload?.generationId || ''), String(payload?.content || ''));
+            await finalizeGeneration(chatId, messageId, String(payload?.generationId || ''), String(payload?.content || ''), userId);
         }
         catch (err) {
             spindle.log?.error?.(`Story Engine finalizer failed: ${String(err)}`);
@@ -476,8 +496,8 @@ function registerGenerationEvents() {
     });
     generationEventsRegistered = true;
 }
-async function finalizeGeneration(chatId, messageId, generationId, rawContent) {
-    const userId = userByChat.get(chatId);
+async function finalizeGeneration(chatId, messageId, generationId, rawContent, eventUserId) {
+    const userId = userForChat(chatId, eventUserId) || userByChat.get(chatId);
     const settings = await loadSettings(userId);
     let state = await loadState(chatId);
     const resolution = state.pending;
@@ -758,14 +778,15 @@ async function dashboardPayload(userId, hint = '') {
     catch { }
     return { type: 'dashboard', chatId, settings, state, connections: mapConnections(connections), capabilities: { chats: has('chats'), chatMutation: has('chat_mutation'), generation: has('generation'), personas: has('personas') }, activePersona: persona ? { id: persona.id, name: persona.name, title: persona.title, description: persona.description } : null };
 }
-async function sendDashboard(userId, hint = '', scheduleBootstrap = true) {
+async function sendDashboard(userId, hint = '', _scheduleBootstrap = true) {
     const payload = await dashboardPayload(userId, hint);
     if (userId)
         spindle.sendToFrontend(payload, userId);
     else
         spindle.sendToFrontend(payload);
-    if (scheduleBootstrap && payload.chatId && payload.settings?.autoBootstrapExistingChat && bootstrapEligible(payload.state) && !bootstrapInFlight.has(payload.chatId))
-        void bootstrapExistingChat(payload.chatId, userId, false);
+    // Do not start history import as a detached backend task. Operator-scoped RPC
+    // user context is guaranteed while handling the originating frontend command,
+    // but can be lost after a fire-and-forget task outlives that callback.
 }
 function registerChatEvents() {
     if (chatEventsRegistered)
@@ -777,12 +798,7 @@ function registerChatEvents() {
         }
         else
             activeChatByUser.delete(userId);
-    } await sendDashboard(userId, id, false); if (id) {
-        const settings = await loadSettings(userId);
-        const state = await loadState(id);
-        if (settings.autoBootstrapExistingChat && bootstrapEligible(state))
-            void bootstrapExistingChat(id, userId, false);
-    } });
+    } await sendDashboard(userId, id, false); });
     // CHAT_CHANGED means a chat entity changed; it is not an active-chat switch.
     // Refresh only when the changed chat is actually the active one.
     spindle.on('CHAT_CHANGED', async (payload, userId) => { const changed = String(payload?.chatId || ''); const active = await activeChatId(userId, ''); if (active && (!changed || changed === active))
@@ -866,7 +882,7 @@ function registerFrontend() {
             if (type === 'import_existing_history') {
                 if (!chatId)
                     throw new Error('No active chat could be detected.');
-                await bootstrapExistingChat(chatId, userId, true);
+                await bootstrapExistingChat(chatId, userId, payload?.auto !== true);
                 return;
             }
             if (type === 'get_progression_options') {

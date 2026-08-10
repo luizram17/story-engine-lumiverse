@@ -11,6 +11,7 @@ export function setup(ctx:Ctx){
   let busy='';
   let chatHint='';
   let personaHint='';
+  const autoImportAttempted=new Set<string>();
 
   const removeStyle=ctx.dom.addStyle(`
     .se-shell{padding:12px 12px 28px;display:flex;flex-direction:column;gap:12px;color:var(--lumiverse-text);font-size:13px}
@@ -133,7 +134,24 @@ export function setup(ctx:Ctx){
     widget.root.querySelector('[data-widget-open]')?.addEventListener('click',()=>{activeView='tracker';tab.activate();render();});
   }
 
-  const unsubBackend=ctx.onBackendMessage((payload:any)=>{if(payload?.type==='dashboard'){dashboard=payload;busy='';render();}else if(payload?.type==='player_created'){busy='';}else if(payload?.type==='progression_options'){progressionOptions=payload;busy='';activeView='progression';render();}else if(payload?.type==='command_error'){busy='';render();}});
+  const unsubBackend=ctx.onBackendMessage((payload:any)=>{
+    if(payload?.type==='dashboard'){
+      dashboard=payload;busy='';
+      const id=String(payload?.chatId||'').trim();if(id)chatHint=id;
+      const bootstrap=payload?.state?.bootstrap||{};
+      const status=String(bootstrap.status||'none');
+      const previousScopeFailure=status==='failed'&&/userId is required for operator-scoped extensions/i.test(String(bootstrap.error||''));
+      const shouldAuto=Boolean(id&&payload?.settings?.autoBootstrapExistingChat!==false&&(status==='none'||status==='idle'||previousScopeFailure));
+      const autoKey=`${id}|${status}|${String(bootstrap.error||'')}`;
+      render();
+      if(shouldAuto&&!autoImportAttempted.has(autoKey)){
+        autoImportAttempted.add(autoKey);
+        setTimeout(()=>{setBusy('history');void request('import_existing_history',{chatId:id,auto:true});},0);
+      }
+    }else if(payload?.type==='player_created'){busy='';}
+    else if(payload?.type==='progression_options'){progressionOptions=payload;busy='';activeView='progression';render();}
+    else if(payload?.type==='command_error'){busy='';render();}
+  });
   const rememberChat=(payload:any)=>{const id=String(payload?.chatId||'').trim();if(id)chatHint=id;return id;};
   const unsubGen=ctx.events.on('GENERATION_ENDED',(payload:any)=>{rememberChat(payload);setTimeout(()=>request('get_dashboard'),250);});
   const unsubChat=ctx.events.on('CHAT_SWITCHED',(payload:any)=>{chatHint=String(payload?.chatId||'');request('get_dashboard',{chatId:chatHint});});

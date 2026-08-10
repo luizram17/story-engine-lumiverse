@@ -11,6 +11,8 @@ let connectionListUserId = null;
 let lastFrontendPayload = null;
 let lastFrontendUserId = null;
 let appendMessageCalls = 0;
+let getMessagesCalls = 0;
+let lastQuietUserId = null;
 const messageUpdates = [];
 let activePersona = {id:'persona-old',name:'Old Hero',title:'Veteran',description:'A nimble veteran scout with a bow.',attached_world_book_id:'wb-1'};
 const createdPersonas=[];
@@ -30,7 +32,7 @@ globalStore.set('story_engine_settings_v4', JSON.stringify({
   progression:true,
   trackerPostPass:false,
   oocCommandsEnabled:true,
-  autoBootstrapExistingChat:false,
+  autoBootstrapExistingChat:true,
 }));
 
 globalThis.spindle = {
@@ -59,9 +61,9 @@ globalThis.spindle = {
   chat:{
     updateMessage:async(chatId,messageId,patch)=>{messageUpdates.push({chatId,messageId,patch});},
     appendMessage:async()=>{appendMessageCalls++;return{};},
-    getMessages:async()=>[{id:'h1',role:'user',content:'We arrive in Emberfall.'},{id:'h2',role:'assistant',content:'Mira, your childhood best friend, greets you at the gate.'},{id:'h3',role:'user',content:'I hug Mira.'}],
+    getMessages:async()=>{getMessagesCalls++;return[{id:'h1',role:'user',content:'We arrive in Emberfall.'},{id:'h2',role:'assistant',content:'Mira, your childhood best friend, greets you at the gate.'},{id:'h3',role:'user',content:'I hug Mira.'}];},
   },
-  generate:{quiet:async(req)=>{quietConnectionIds.push(req?.connection_id||'');const system=String(req?.messages?.[0]?.content||'');if(system.includes("Command Assistant"))return{tool_calls:[{name:'apply_story_state_changes',args:{summary:'Moved the scene.',operations:[{op:'set',path:['world','location'],value:'Commanded Place'}]}}]};if(system.includes("History Import Assistant"))return{tool_calls:[{name:'apply_story_history_import',args:{summary:'Imported established history.',operations:[{op:'set',path:['world','location'],value:'Emberfall'},{op:'set',path:['world','presentNpcs'],value:['Mira']},{op:'merge',path:['npcs','Mira'],value:{name:'Mira',role:'companion',rank:'Average',bond:4,companion:true,relationshipDescriptors:['childhood best friend'],personalitySummary:'Old and trusted friend.'}}]}}]};if(system.includes('CURRENT LUMIVERSE PERSONA'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Old Hero',race:'Human',genre:'Fantasy',appearance:'Nimble veteran scout',stats:{PHY:6,MND:5,CHA:4},naturalWeapons:[],abilities:['Scouting','Archery'],spells:[],inventory:['Bow'],currency:[],gear:['Travel cloak'],anchors:['Veteran scout'],concept:'Scout',backstory:'Experienced traveler'}}]};if(system.includes('Create a concise player character sheet'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Manual Hero',race:'Human',genre:'Fantasy',appearance:'A road-worn traveler',stats:{PHY:5,MND:5,CHA:5},naturalWeapons:[],abilities:['Travel'],spells:[],inventory:['Rope'],currency:[],gear:['Travel clothes'],anchors:['Practical traveler'],concept:'Traveler',backstory:'Has spent years on the road.'}}]};return{content:''};}},
+  generate:{quiet:async(req,userId)=>{lastQuietUserId=userId;assert.equal(userId,'user-smoke','operator-scoped sidecar generation must receive userId');quietConnectionIds.push(req?.connection_id||'');const system=String(req?.messages?.[0]?.content||'');if(system.includes("Command Assistant"))return{tool_calls:[{name:'apply_story_state_changes',args:{summary:'Moved the scene.',operations:[{op:'set',path:['world','location'],value:'Commanded Place'}]}}]};if(system.includes("History Import Assistant"))return{tool_calls:[{name:'apply_story_history_import',args:{summary:'Imported established history.',operations:[{op:'set',path:['world','location'],value:'Emberfall'},{op:'set',path:['world','presentNpcs'],value:['Mira']},{op:'merge',path:['npcs','Mira'],value:{name:'Mira',role:'companion',rank:'Average',bond:4,companion:true,relationshipDescriptors:['childhood best friend'],personalitySummary:'Old and trusted friend.'}}]}}]};if(system.includes('CURRENT LUMIVERSE PERSONA'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Old Hero',race:'Human',genre:'Fantasy',appearance:'Nimble veteran scout',stats:{PHY:6,MND:5,CHA:4},naturalWeapons:[],abilities:['Scouting','Archery'],spells:[],inventory:['Bow'],currency:[],gear:['Travel cloak'],anchors:['Veteran scout'],concept:'Scout',backstory:'Experienced traveler'}}]};if(system.includes('Create a concise player character sheet'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Manual Hero',race:'Human',genre:'Fantasy',appearance:'A road-worn traveler',stats:{PHY:5,MND:5,CHA:5},naturalWeapons:[],abilities:['Travel'],spells:[],inventory:['Rope'],currency:[],gear:['Travel clothes'],anchors:['Practical traveler'],concept:'Traveler',backstory:'Has spent years on the road.'}}]};return{content:''};}},
   log:{info:()=>{},warn:()=>{},error:()=>{}},
   toast:{success:()=>{},error:()=>{}},
 };
@@ -82,6 +84,8 @@ assert.equal(lastFrontendPayload?.activePersona?.id,'persona-old','dashboard fai
 assert.equal(lastFrontendPayload?.chatId,'chat-smoke');
 assert.equal(lastFrontendPayload?.connections?.[0]?.model,'gpt-test');
 assert.equal(appendMessageCalls,0,'opening/attaching Story Engine must never inject a synthetic Start Adventure message');
+await new Promise(r=>setTimeout(r,5));
+assert.equal(getMessagesCalls,0,'dashboard attachment must not launch history import as a detached backend task');
 
 await frontendHandler({type:'save_settings',chatId:'chat-smoke',settings:{semanticTemperature:0.22}},'user-smoke');
 assert.equal(savedSettingsUserId,'user-smoke','settings were not saved in operator-safe per-user storage');
@@ -129,6 +133,7 @@ assert.equal(state.npcs.Mira.bond,4);
 assert.deepEqual(state.npcs.Mira.relationshipDescriptors,['childhood best friend']);
 assert.ok(state.health.npcs.Mira);
 assert.deepEqual(state.world.presentNpcs,['Mira'],'history import did not reconstruct current-scene NPC presence');
+assert.equal(lastQuietUserId,'user-smoke','history import sidecar generation lost operator user scope');
 
 // Manual character creation resolves an explicit usable connection before assistant generation.
 await frontendHandler({type:'create_player',applyMode:'state_only',input:{name:'Manual Hero',race:'Human',genre:'Fantasy',concept:'Traveler',appearance:'A road-worn traveler',backstory:'Has spent years on the road.',stats:{PHY:5,MND:5,CHA:5},desiredAbilities:'Travel',desiredSpells:'',inventory:'Rope',anchors:'Practical traveler'}},'user-smoke');

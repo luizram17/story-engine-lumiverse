@@ -8,6 +8,7 @@ export function setup(ctx) {
     let busy = '';
     let chatHint = '';
     let personaHint = '';
+    const autoImportAttempted = new Set();
     const removeStyle = ctx.dom.addStyle(`
     .se-shell{padding:12px 12px 28px;display:flex;flex-direction:column;gap:12px;color:var(--lumiverse-text);font-size:13px}
     .se-hero{padding:14px;border:1px solid var(--lumiverse-border);background:var(--lumiverse-fill-subtle);border-radius:12px}
@@ -176,24 +177,38 @@ export function setup(ctx) {
       </div></div>`;
         widget.root.querySelector('[data-widget-open]')?.addEventListener('click', () => { activeView = 'tracker'; tab.activate(); render(); });
     }
-    const unsubBackend = ctx.onBackendMessage((payload) => { if (payload?.type === 'dashboard') {
-        dashboard = payload;
-        busy = '';
-        render();
-    }
-    else if (payload?.type === 'player_created') {
-        busy = '';
-    }
-    else if (payload?.type === 'progression_options') {
-        progressionOptions = payload;
-        busy = '';
-        activeView = 'progression';
-        render();
-    }
-    else if (payload?.type === 'command_error') {
-        busy = '';
-        render();
-    } });
+    const unsubBackend = ctx.onBackendMessage((payload) => {
+        if (payload?.type === 'dashboard') {
+            dashboard = payload;
+            busy = '';
+            const id = String(payload?.chatId || '').trim();
+            if (id)
+                chatHint = id;
+            const bootstrap = payload?.state?.bootstrap || {};
+            const status = String(bootstrap.status || 'none');
+            const previousScopeFailure = status === 'failed' && /userId is required for operator-scoped extensions/i.test(String(bootstrap.error || ''));
+            const shouldAuto = Boolean(id && payload?.settings?.autoBootstrapExistingChat !== false && (status === 'none' || status === 'idle' || previousScopeFailure));
+            const autoKey = `${id}|${status}|${String(bootstrap.error || '')}`;
+            render();
+            if (shouldAuto && !autoImportAttempted.has(autoKey)) {
+                autoImportAttempted.add(autoKey);
+                setTimeout(() => { setBusy('history'); void request('import_existing_history', { chatId: id, auto: true }); }, 0);
+            }
+        }
+        else if (payload?.type === 'player_created') {
+            busy = '';
+        }
+        else if (payload?.type === 'progression_options') {
+            progressionOptions = payload;
+            busy = '';
+            activeView = 'progression';
+            render();
+        }
+        else if (payload?.type === 'command_error') {
+            busy = '';
+            render();
+        }
+    });
     const rememberChat = (payload) => { const id = String(payload?.chatId || '').trim(); if (id)
         chatHint = id; return id; };
     const unsubGen = ctx.events.on('GENERATION_ENDED', (payload) => { rememberChat(payload); setTimeout(() => request('get_dashboard'), 250); });
