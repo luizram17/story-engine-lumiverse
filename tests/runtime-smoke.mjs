@@ -13,6 +13,9 @@ let activePersona = {id:'persona-old',name:'Old Hero',title:'Veteran',descriptio
 const createdPersonas=[];
 let switchedPersonaId=null;
 let personaUpdateCalls=0;
+const userSettingsStore=new Map();
+let savedSettingsUserId=null;
+const quietUserIds=[];
 
 globalStore.set('story_engine_settings_v4', JSON.stringify({
   enabled:true,
@@ -29,6 +32,10 @@ globalStore.set('story_engine_settings_v4', JSON.stringify({
 
 globalThis.spindle = {
   permissions:{ has:()=>true, onChanged:()=>{} },
+  userStorage:{
+    getJson:async(path,opts={})=>userSettingsStore.get(`${opts.userId}|${path}`)??opts.fallback,
+    setJson:async(path,value,opts={})=>{savedSettingsUserId=opts.userId;userSettingsStore.set(`${opts.userId}|${path}`,value);},
+  },
   variables:{
     global:{ get:async k=>globalStore.get(k), set:async(k,v)=>globalStore.set(k,v) },
     chat:{ get:async(chatId,k)=>chatStore.get(`${chatId}|${k}`), set:async(chatId,k,v)=>chatStore.set(`${chatId}|${k}`,v) },
@@ -45,7 +52,7 @@ globalThis.spindle = {
     appendMessage:async()=>({}),
     getMessages:async()=>[{id:'h1',role:'user',content:'We arrive in Emberfall.'},{id:'h2',role:'assistant',content:'Mira, your childhood best friend, greets you at the gate.'},{id:'h3',role:'user',content:'I hug Mira.'}],
   },
-  generate:{quiet:async(req)=>{const system=String(req?.messages?.[0]?.content||'');if(system.includes("Command Assistant"))return{tool_calls:[{name:'apply_story_state_changes',args:{summary:'Moved the scene.',operations:[{op:'set',path:['world','location'],value:'Commanded Place'}]}}]};if(system.includes("History Import Assistant"))return{tool_calls:[{name:'apply_story_history_import',args:{summary:'Imported established history.',operations:[{op:'set',path:['world','location'],value:'Emberfall'},{op:'merge',path:['npcs','Mira'],value:{name:'Mira',role:'companion',rank:'Average',bond:4,companion:true,relationshipDescriptors:['childhood best friend'],personalitySummary:'Old and trusted friend.'}}]}}]};if(system.includes('CURRENT LUMIVERSE PERSONA'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Old Hero',race:'Human',genre:'Fantasy',appearance:'Nimble veteran scout',stats:{PHY:6,MND:5,CHA:4},naturalWeapons:[],abilities:['Scouting','Archery'],spells:[],inventory:['Bow'],currency:[],gear:['Travel cloak'],anchors:['Veteran scout'],concept:'Scout',backstory:'Experienced traveler'}}]};return{content:''};}},
+  generate:{quiet:async(req,userId)=>{quietUserIds.push(userId);const system=String(req?.messages?.[0]?.content||'');if(system.includes("Command Assistant"))return{tool_calls:[{name:'apply_story_state_changes',args:{summary:'Moved the scene.',operations:[{op:'set',path:['world','location'],value:'Commanded Place'}]}}]};if(system.includes("History Import Assistant"))return{tool_calls:[{name:'apply_story_history_import',args:{summary:'Imported established history.',operations:[{op:'set',path:['world','location'],value:'Emberfall'},{op:'merge',path:['npcs','Mira'],value:{name:'Mira',role:'companion',rank:'Average',bond:4,companion:true,relationshipDescriptors:['childhood best friend'],personalitySummary:'Old and trusted friend.'}}]}}]};if(system.includes('CURRENT LUMIVERSE PERSONA'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Old Hero',race:'Human',genre:'Fantasy',appearance:'Nimble veteran scout',stats:{PHY:6,MND:5,CHA:4},naturalWeapons:[],abilities:['Scouting','Archery'],spells:[],inventory:['Bow'],currency:[],gear:['Travel cloak'],anchors:['Veteran scout'],concept:'Scout',backstory:'Experienced traveler'}}]};return{content:''};}},
   log:{info:()=>{},warn:()=>{},error:()=>{}},
   toast:{success:()=>{},error:()=>{}},
 };
@@ -60,6 +67,10 @@ assert.equal(activeChatUserId,undefined,'dashboard should use host-scoped getAct
 assert.equal(connectionListUserId,'user-smoke','dashboard did not list connections in user scope');
 assert.equal(lastFrontendPayload?.chatId,'chat-smoke');
 assert.equal(lastFrontendPayload?.connections?.[0]?.model,'gpt-test');
+
+await frontendHandler({type:'save_settings',chatId:'chat-smoke',settings:{semanticTemperature:0.22}},'user-smoke');
+assert.equal(savedSettingsUserId,'user-smoke','settings were not saved in operator-safe per-user storage');
+assert.equal(userSettingsStore.get('user-smoke|settings.json').semanticTemperature,0.22);
 
 const messages=[{role:'user',content:'I carefully climb the unstable wall.'}];
 const intercepted=await interceptor(messages,{chatId:'chat-smoke',connectionId:'conn',generationType:'normal',userId:'user-smoke'});
@@ -112,5 +123,6 @@ assert.equal(switchedPersonaId,createdPersonas[0].id);
 assert.equal(createdPersonas[0].attached_world_book_id,'wb-1');
 state=JSON.parse(chatStore.get('chat-smoke|story_engine_state_v7'));
 assert.equal(state.player.stats.PHY+state.player.stats.MND+state.player.stats.CHA,15);
+assert.ok(quietUserIds.filter(Boolean).every(id=>id==='user-smoke'),'quiet generation leaked or lost operator user scope');
 
 console.log('Story Engine Spindle runtime smoke passed');

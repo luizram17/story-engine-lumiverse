@@ -14,6 +14,7 @@ import { applyPlayerToState, buildCharacterPrompt, buildPersonaConversionPrompt,
 import { applyMutationBatch, bootstrapAssistantPrompt, commandAssistantPrompt, extractOocCommands, mutationTool, normalizeMutationBatch, stripOocCommands } from './core/commands.js';
 const pendingGenerationByChat = new Map();
 const activeChatByUser = new Map();
+const userByChat = new Map();
 const bootstrapInFlight = new Set();
 let interceptorRegistered = false;
 let generationEventsRegistered = false;
@@ -25,7 +26,18 @@ function has(permission) { try {
 catch {
     return false;
 } }
-async function loadSettings() {
+async function loadSettings(userId) {
+    if (userId) {
+        try {
+            const stored = await spindle.userStorage.getJson('settings.json', { fallback: null, userId });
+            if (stored)
+                return normalizeSettings(stored);
+        }
+        catch (err) {
+            spindle.log?.warn?.(`Story Engine user settings read failed: ${String(err)}`);
+        }
+    }
+    // Backward-compatible fallback for user-scoped installs / legacy settings.
     try {
         const raw = await spindle.variables.global.get(SETTINGS_GLOBAL_KEY);
         return raw ? normalizeSettings(JSON.parse(raw)) : normalizeSettings(DEFAULT_SETTINGS);
@@ -34,7 +46,19 @@ async function loadSettings() {
         return normalizeSettings(DEFAULT_SETTINGS);
     }
 }
-async function saveSettings(settings) { await spindle.variables.global.set(SETTINGS_GLOBAL_KEY, JSON.stringify(normalizeSettings(settings))); }
+async function saveSettings(settings, userId) {
+    const normalized = normalizeSettings(settings);
+    if (userId) {
+        await spindle.userStorage.setJson('settings.json', normalized, { indent: 2, userId });
+        return;
+    }
+    await spindle.variables.global.set(SETTINGS_GLOBAL_KEY, JSON.stringify(normalized));
+}
+function userForChat(chatId, explicit) { const id = String(explicit || '').trim(); if (id) {
+    userByChat.set(chatId, id);
+    activeChatByUser.set(id, chatId);
+    return id;
+} return userByChat.get(chatId); }
 async function resolveConnectionId(primary, secondary = '', runtime = '', userId) {
     for (const id of [primary, secondary, runtime].map(x => String(x || '').trim()).filter(Boolean)) {
         try {
@@ -112,8 +136,8 @@ function storyDataContext(state) {
     const json = JSON.stringify(data, null, 2);
     return json.length <= 36000 ? json : `${buildStateContext(state)}\n\n[Full state omitted from prompt because it is very large; use the tracker summary above.]`;
 }
-async function runMutationAssistant(messages, toolName, connectionId) {
-    const result = await spindle.generate.quiet({ messages, tools: [mutationTool(toolName)], parameters: { temperature: 0.05, max_tokens: 3200 }, connection_id: connectionId || undefined, reasoning: { source: 'off' } });
+async function runMutationAssistant(messages, toolName, connectionId, userId) {
+    const result = await spindle.generate.quiet({ messages, tools: [mutationTool(toolName)], parameters: { temperature: 0.05, max_tokens: 3200 }, connection_id: connectionId || undefined, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === toolName) || result?.tool_calls?.[0];
     const payload = call?.args ?? parseJsonContent(result?.content);
     if (!payload)
@@ -127,7 +151,7 @@ async function applyOocCommands(chatId, commands, messages, settings, state, con
     if (!has('generation'))
         throw new Error('generation permission is required for OOC commands.');
     const commandConnection = await resolveConnectionId(settings.commandConnectionId, settings.semanticConnectionId, context?.connectionId || '', context?.userId);
-    const batch = await runMutationAssistant(commandAssistantPrompt(commands, storyDataContext(state), historyBeforeLatestUser(messages, Math.max(8, settings.recentMessageCount))), 'apply_story_state_changes', commandConnection || '');
+    const batch = await runMutationAssistant(commandAssistantPrompt(commands, storyDataContext(state), historyBeforeLatestUser(messages, Math.max(8, settings.recentMessageCount))), 'apply_story_state_changes', commandConnection || '', context?.userId || userByChat.get(chatId));
     const applied = applyMutationBatch(state, batch);
     applied.state.commandHistory.push({ fingerprint, createdAt: Date.now(), commands: [...commands], summary: batch.summary || 'OOC command applied.', operations: batch.operations });
     await saveState(chatId, applied.state);
@@ -162,7 +186,7 @@ function bootstrapEligible(state) { return state.bootstrap.status !== 'ready' &&
 async function bootstrapExistingChat(chatId, userId, force = false) {
     if (bootstrapInFlight.has(chatId))
         return;
-    const settings = await loadSettings();
+    const settings = await loadSettings(userId);
     if (!has('generation') || !has('chat_mutation'))
         return;
     let state = await loadState(chatId);
@@ -193,7 +217,7 @@ async function bootstrapExistingChat(chatId, userId, force = false) {
         const chunks = splitTranscript(messages);
         for (let i = 0; i < chunks.length; i++) {
             const bootstrapConnection = await resolveConnectionId(settings.bootstrapConnectionId, settings.semanticConnectionId, '', userId);
-            const batch = await runMutationAssistant(bootstrapAssistantPrompt(chunks[i], storyDataContext(state), personaContext, i + 1, chunks.length), 'apply_story_history_import', bootstrapConnection || '');
+            const batch = await runMutationAssistant(bootstrapAssistantPrompt(chunks[i], storyDataContext(state), personaContext, i + 1, chunks.length), 'apply_story_history_import', bootstrapConnection || '', userId);
             const hadPlayer = Boolean(state.player);
             state = applyMutationBatch(state, batch).state;
             if (!hadPlayer && state.player)
@@ -224,7 +248,7 @@ async function extractSemantic(messages, context, settings, state, userText) {
     const prompts = buildSemanticPrompt({ userMessage: userText, history: compactHistory(messages, settings.recentMessageCount), stateContext: buildStateContext(state) });
     try {
         const semanticConnection = await resolveConnectionId(settings.semanticConnectionId, '', context?.connectionId || '', context?.userId);
-        const result = await spindle.generate.quiet({ messages: prompts, tools: [semanticTool()], parameters: { temperature: settings.semanticTemperature, max_tokens: 2400 }, connection_id: semanticConnection, reasoning: { source: 'off' } });
+        const result = await spindle.generate.quiet({ messages: prompts, tools: [semanticTool()], parameters: { temperature: settings.semanticTemperature, max_tokens: 2400 }, connection_id: semanticConnection, reasoning: { source: 'off' } }, context?.userId || userByChat.get(String(context?.chatId || '')));
         const call = result?.tool_calls?.find((x) => x?.name === 'submit_story_ledger') || result?.tool_calls?.[0];
         const payload = call?.args ?? parseJsonContent(result?.content);
         if (!payload)
@@ -262,14 +286,13 @@ function registerInterceptor() {
     if (interceptorRegistered || !has('interceptor'))
         return;
     spindle.registerInterceptor(async (messages, context) => {
-        const settings = await loadSettings();
+        const chatId = String(context?.chatId || '');
+        const scopedUserId = userForChat(chatId, context?.userId);
+        const settings = await loadSettings(scopedUserId);
         if (!settings.enabled || context?.dryRun === true || context?.generationType === 'quiet' || context?.generationType === 'impersonate')
             return messages;
-        const chatId = String(context?.chatId || '');
         if (!chatId)
             return messages;
-        if (context?.userId)
-            activeChatByUser.set(String(context.userId), chatId);
         const rawUserText = lastUserText(messages);
         if (!rawUserText.trim())
             return messages;
@@ -369,7 +392,8 @@ function registerGenerationEvents() {
     generationEventsRegistered = true;
 }
 async function finalizeGeneration(chatId, messageId, generationId, rawContent) {
-    const settings = await loadSettings();
+    const userId = userByChat.get(chatId);
+    const settings = await loadSettings(userId);
     let state = await loadState(chatId);
     const resolution = state.pending;
     if (!settings.enabled || !resolution)
@@ -379,7 +403,7 @@ async function finalizeGeneration(chatId, messageId, generationId, rawContent) {
     if (content !== rawContent && has('chat_mutation'))
         await spindle.chat.updateMessage(chatId, messageId, { content, metadata: { story_engine_sanitized: true } });
     if (settings.proseGuardMode === 'automatic' && findings.length && has('generation') && has('chat_mutation')) {
-        const repaired = await repairProse(content, findings, settings);
+        const repaired = await repairProse(content, findings, settings, userId);
         if (repaired && repaired !== content) {
             content = repaired;
             await spindle.chat.updateMessage(chatId, messageId, { content, metadata: { story_engine_prose_guard: 'automatic' } });
@@ -400,7 +424,7 @@ async function finalizeGeneration(chatId, messageId, generationId, rawContent) {
     const notes = commitResolution(state, resolution, settings, chatId);
     if (settings.trackerPostPass && has('generation')) {
         try {
-            const delta = await extractPostTurnDelta(state, resolution, content, settings);
+            const delta = await extractPostTurnDelta(state, resolution, content, settings, userId);
             applyPostTurnDelta(state, delta, notes);
         }
         catch (err) {
@@ -457,9 +481,9 @@ function commitResolution(state, resolution, settings, chatId) {
         notes.push(`Loot search status: ${resolution.lootResult.status}.`);
     return notes;
 }
-async function repairProse(content, findings, settings) {
+async function repairProse(content, findings, settings, userId) {
     try {
-        const result = await spindle.generate.quiet({ messages: [{ role: 'user', content: proseRepairPrompt(content, findings) }], parameters: { temperature: 0.1, max_tokens: Math.max(600, Math.ceil(content.length / 2)) }, connection_id: settings.proseGuardConnectionId || settings.semanticConnectionId || undefined, reasoning: { source: 'off' } });
+        const result = await spindle.generate.quiet({ messages: [{ role: 'user', content: proseRepairPrompt(content, findings) }], parameters: { temperature: 0.1, max_tokens: Math.max(600, Math.ceil(content.length / 2)) }, connection_id: settings.proseGuardConnectionId || settings.semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
         const repaired = stripStructuredArtifacts(String(result?.content || '')).trim();
         if (!repaired)
             return content;
@@ -472,8 +496,8 @@ async function repairProse(content, findings, settings) {
         return content;
     }
 }
-async function extractPostTurnDelta(state, resolution, narration, settings) {
-    const result = await spindle.generate.quiet({ messages: buildPostTurnPrompt(state, resolution, narration), tools: [postTurnTool()], parameters: { temperature: 0.1, max_tokens: 1800 }, connection_id: settings.semanticConnectionId || undefined, reasoning: { source: 'off' } });
+async function extractPostTurnDelta(state, resolution, narration, settings, userId) {
+    const result = await spindle.generate.quiet({ messages: buildPostTurnPrompt(state, resolution, narration), tools: [postTurnTool()], parameters: { temperature: 0.1, max_tokens: 1800 }, connection_id: settings.semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === 'submit_post_turn_delta') || result?.tool_calls?.[0];
     return call?.args ?? parseJsonContent(result?.content) ?? {};
 }
@@ -587,8 +611,10 @@ function applyPostTurnDelta(state, delta, notes) {
 async function activeChatId(userId, hint = '') {
     const explicit = String(hint || '').trim();
     if (explicit) {
-        if (userId)
+        if (userId) {
             activeChatByUser.set(userId, explicit);
+            userByChat.set(explicit, userId);
+        }
         return explicit;
     }
     if (userId && activeChatByUser.has(userId))
@@ -610,7 +636,7 @@ async function activeChatId(userId, hint = '') {
 }
 function mapConnections(raw) { return raw.map((c) => ({ id: String(c.id || c.connection_id || ''), name: String(c.name || c.label || c.model || c.id || 'Connection'), provider: String(c.provider || ''), model: String(c.model || ''), isDefault: Boolean(c.is_default), hasApiKey: c.has_api_key !== false })).filter(c => c.id); }
 async function dashboardPayload(userId, hint = '') {
-    const settings = await loadSettings();
+    const settings = await loadSettings(userId);
     const chatId = await activeChatId(userId, hint);
     const state = chatId ? await loadState(chatId) : createDefaultState();
     let connections = [];
@@ -639,12 +665,14 @@ function registerChatEvents() {
     if (chatEventsRegistered)
         return;
     const handle = async (payload, userId) => { const id = String(payload?.chatId || ''); if (userId) {
-        if (id)
+        if (id) {
             activeChatByUser.set(userId, id);
+            userByChat.set(id, userId);
+        }
         else
             activeChatByUser.delete(userId);
     } await sendDashboard(userId, id, false); if (id) {
-        const settings = await loadSettings();
+        const settings = await loadSettings(userId);
         const state = await loadState(id);
         if (settings.autoBootstrapExistingChat && bootstrapEligible(state))
             void bootstrapExistingChat(id, userId, false);
@@ -665,8 +693,8 @@ function registerFrontend() {
                 return;
             }
             if (type === 'save_settings') {
-                const current = await loadSettings();
-                await saveSettings(normalizeSettings({ ...current, ...object(payload.settings) }));
+                const current = await loadSettings(userId);
+                await saveSettings(normalizeSettings({ ...current, ...object(payload.settings) }), userId);
                 spindle.toast?.success?.('Story Engine settings saved.');
                 await sendDashboard(userId, hint);
                 return;
@@ -756,9 +784,9 @@ async function handleCreatePlayer(chatId, payload, userId) {
     const errors = validateCharacterInput(input);
     if (errors.length)
         throw new Error(errors.join(' '));
-    const settings = await loadSettings();
+    const settings = await loadSettings(userId);
     const personaConnection = await resolveConnectionId(settings.personaConnectionId, settings.semanticConnectionId, '', userId);
-    const result = await spindle.generate.quiet({ messages: buildCharacterPrompt(input), tools: [characterTool()], parameters: { temperature: .35, max_tokens: 2200 }, connection_id: personaConnection, reasoning: { source: 'off' } });
+    const result = await spindle.generate.quiet({ messages: buildCharacterPrompt(input), tools: [characterTool()], parameters: { temperature: .35, max_tokens: 2200 }, connection_id: personaConnection, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === 'submit_character_sheet') || result?.tool_calls?.[0];
     const sheet = normalizeCharacterSheet(call?.args ?? parseJsonContent(result?.content) ?? {}, input);
     const state = await loadState(chatId);
@@ -778,9 +806,9 @@ async function handleConvertActivePersona(chatId, userId) {
     const source = await spindle.personas.getActive();
     if (!source)
         throw new Error('No active persona is selected.');
-    const settings = await loadSettings();
+    const settings = await loadSettings(userId);
     const personaConnection = await resolveConnectionId(settings.personaConnectionId, settings.semanticConnectionId, '', userId);
-    const result = await spindle.generate.quiet({ messages: buildPersonaConversionPrompt(source), tools: [characterTool()], parameters: { temperature: .25, max_tokens: 2200 }, connection_id: personaConnection, reasoning: { source: 'off' } });
+    const result = await spindle.generate.quiet({ messages: buildPersonaConversionPrompt(source), tools: [characterTool()], parameters: { temperature: .25, max_tokens: 2200 }, connection_id: personaConnection, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === 'submit_character_sheet') || result?.tool_calls?.[0];
     const sheet = normalizeConvertedPersonaSheet(call?.args ?? parseJsonContent(result?.content) ?? {}, source);
     const state = await loadState(chatId);
@@ -798,7 +826,7 @@ async function handleProgressionOptions(chatId, userId) {
     if (state.progression.pendingMilestones <= 0)
         throw new Error('No progression milestone is pending.');
     const tool = { name: 'submit_progression_options', description: 'Return three distinct ability options and three spell options suitable for the player progression milestone.', parameters: { type: 'object', additionalProperties: false, properties: { abilities: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'string' } }, spells: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'string' } } }, required: ['abilities', 'spells'] } };
-    const result = await spindle.generate.quiet({ messages: [{ role: 'system', content: 'Design grounded progression choices for the existing character. Options should extend established themes without sudden unrelated powers. Abilities are useful capabilities, never automatic success. Spells should be bounded and setting-consistent. Call submit_progression_options once.' }, { role: 'user', content: renderPersonaDescription(state.player) }], tools: [tool], parameters: { temperature: .65, max_tokens: 900 }, connection_id: (await loadSettings()).semanticConnectionId || undefined, reasoning: { source: 'off' } });
+    const result = await spindle.generate.quiet({ messages: [{ role: 'system', content: 'Design grounded progression choices for the existing character. Options should extend established themes without sudden unrelated powers. Abilities are useful capabilities, never automatic success. Spells should be bounded and setting-consistent. Call submit_progression_options once.' }, { role: 'user', content: renderPersonaDescription(state.player) }], tools: [tool], parameters: { temperature: .65, max_tokens: 900 }, connection_id: (await loadSettings(userId)).semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === 'submit_progression_options') || result?.tool_calls?.[0];
     const o = object(call?.args ?? parseJsonContent(result?.content));
     spindle.sendToFrontend({ type: 'progression_options', abilities: Array.isArray(o.abilities) ? o.abilities : [], spells: Array.isArray(o.spells) ? o.spells : [] }, userId);
@@ -844,8 +872,8 @@ async function handleApplyProseSuggestion(chatId, payload, userId) {
         throw new Error('No prose review is pending.');
     if (!has('chat_mutation'))
         throw new Error('chat_mutation permission is required.');
-    const settings = await loadSettings();
-    const repaired = review.suggested || await repairProse(review.content, review.findings, settings);
+    const settings = await loadSettings(userId);
+    const repaired = review.suggested || await repairProse(review.content, review.findings, settings, userId);
     if (repaired && repaired !== review.content)
         await spindle.chat.updateMessage(chatId, review.messageId, { content: repaired, metadata: { story_engine_prose_guard: 'review-applied' } });
     state.proseReview = null;

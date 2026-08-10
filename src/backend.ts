@@ -18,6 +18,7 @@ import { applyMutationBatch, bootstrapAssistantPrompt, commandAssistantPrompt, e
 
 const pendingGenerationByChat = new Map<string, string>();
 const activeChatByUser = new Map<string, string>();
+const userByChat = new Map<string, string>();
 const bootstrapInFlight = new Set<string>();
 let interceptorRegistered = false;
 let generationEventsRegistered = false;
@@ -26,11 +27,23 @@ let chatEventsRegistered = false;
 
 function has(permission:string):boolean { try { return spindle.permissions?.has ? spindle.permissions.has(permission) : true; } catch { return false; } }
 
-async function loadSettings():Promise<StorySettings>{
+async function loadSettings(userId?:string):Promise<StorySettings>{
+  if(userId){
+    try{
+      const stored=await spindle.userStorage.getJson('settings.json',{fallback:null,userId});
+      if(stored)return normalizeSettings(stored);
+    }catch(err){spindle.log?.warn?.(`Story Engine user settings read failed: ${String(err)}`);}
+  }
+  // Backward-compatible fallback for user-scoped installs / legacy settings.
   try { const raw=await spindle.variables.global.get(SETTINGS_GLOBAL_KEY); return raw?normalizeSettings(JSON.parse(raw)):normalizeSettings(DEFAULT_SETTINGS); }
   catch { return normalizeSettings(DEFAULT_SETTINGS); }
 }
-async function saveSettings(settings:StorySettings):Promise<void>{ await spindle.variables.global.set(SETTINGS_GLOBAL_KEY,JSON.stringify(normalizeSettings(settings))); }
+async function saveSettings(settings:StorySettings,userId?:string):Promise<void>{
+  const normalized=normalizeSettings(settings);
+  if(userId){await spindle.userStorage.setJson('settings.json',normalized,{indent:2,userId});return;}
+  await spindle.variables.global.set(SETTINGS_GLOBAL_KEY,JSON.stringify(normalized));
+}
+function userForChat(chatId:string,explicit?:string):string|undefined{const id=String(explicit||'').trim();if(id){userByChat.set(chatId,id);activeChatByUser.set(id,chatId);return id;}return userByChat.get(chatId);}
 async function resolveConnectionId(primary:string,secondary='',runtime='',userId?:string):Promise<string|undefined>{
   for(const id of [primary,secondary,runtime].map(x=>String(x||'').trim()).filter(Boolean)){
     try{const conn=await spindle.connections.get(id,userId||undefined);if(conn&&conn.has_api_key!==false)return id;}catch{}
@@ -76,8 +89,8 @@ function storyDataContext(state:StoryState):string{
   const json=JSON.stringify(data,null,2);
   return json.length<=36000?json:`${buildStateContext(state)}\n\n[Full state omitted from prompt because it is very large; use the tracker summary above.]`;
 }
-async function runMutationAssistant(messages:Array<{role:'system'|'user';content:string}>,toolName:string,connectionId:string):Promise<ReturnType<typeof normalizeMutationBatch>>{
-  const result=await spindle.generate.quiet({messages,tools:[mutationTool(toolName)],parameters:{temperature:0.05,max_tokens:3200},connection_id:connectionId||undefined,reasoning:{source:'off'}});
+async function runMutationAssistant(messages:Array<{role:'system'|'user';content:string}>,toolName:string,connectionId:string,userId?:string):Promise<ReturnType<typeof normalizeMutationBatch>>{
+  const result=await spindle.generate.quiet({messages,tools:[mutationTool(toolName)],parameters:{temperature:0.05,max_tokens:3200},connection_id:connectionId||undefined,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name===toolName)||result?.tool_calls?.[0];
   const payload=call?.args??parseJsonContent(result?.content);
   if(!payload)throw new Error(`No structured payload returned by ${toolName}.`);
@@ -88,7 +101,7 @@ async function applyOocCommands(chatId:string,commands:string[],messages:any[],s
   if(existing)return{state,summary:existing.summary,replayed:true};
   if(!has('generation'))throw new Error('generation permission is required for OOC commands.');
   const commandConnection=await resolveConnectionId(settings.commandConnectionId,settings.semanticConnectionId,context?.connectionId||'',context?.userId);
-  const batch=await runMutationAssistant(commandAssistantPrompt(commands,storyDataContext(state),historyBeforeLatestUser(messages,Math.max(8,settings.recentMessageCount))), 'apply_story_state_changes', commandConnection||'');
+  const batch=await runMutationAssistant(commandAssistantPrompt(commands,storyDataContext(state),historyBeforeLatestUser(messages,Math.max(8,settings.recentMessageCount))), 'apply_story_state_changes', commandConnection||'', context?.userId||userByChat.get(chatId));
   const applied=applyMutationBatch(state,batch);
   applied.state.commandHistory.push({fingerprint,createdAt:Date.now(),commands:[...commands],summary:batch.summary||'OOC command applied.',operations:batch.operations});
   await saveState(chatId,applied.state);
@@ -107,7 +120,7 @@ function splitTranscript(messages:any[],maxChars=26000):string[]{
 function bootstrapEligible(state:StoryState):boolean{return state.bootstrap.status!=='ready'&&state.turn===0&&state.audits.length===0;}
 async function bootstrapExistingChat(chatId:string,userId?:string,force=false):Promise<void>{
   if(bootstrapInFlight.has(chatId))return;
-  const settings=await loadSettings();
+  const settings=await loadSettings(userId);
   if(!has('generation')||!has('chat_mutation'))return;
   let state=await loadState(chatId);
   if(!force&&!bootstrapEligible(state))return;
@@ -124,7 +137,7 @@ async function bootstrapExistingChat(chatId:string,userId?:string,force=false):P
     const chunks=splitTranscript(messages);
     for(let i=0;i<chunks.length;i++){
       const bootstrapConnection=await resolveConnectionId(settings.bootstrapConnectionId,settings.semanticConnectionId,'',userId);
-      const batch=await runMutationAssistant(bootstrapAssistantPrompt(chunks[i]!,storyDataContext(state),personaContext,i+1,chunks.length),'apply_story_history_import',bootstrapConnection||'');
+      const batch=await runMutationAssistant(bootstrapAssistantPrompt(chunks[i]!,storyDataContext(state),personaContext,i+1,chunks.length),'apply_story_history_import',bootstrapConnection||'',userId);
       const hadPlayer=Boolean(state.player);
       state=applyMutationBatch(state,batch).state;
       if(!hadPlayer&&state.player)state.player.stats=normalizeStartingStatBudget(state.player.stats);
@@ -144,7 +157,7 @@ async function extractSemantic(messages:any[], context:any, settings:StorySettin
   const prompts=buildSemanticPrompt({userMessage:userText,history:compactHistory(messages,settings.recentMessageCount),stateContext:buildStateContext(state)});
   try{
     const semanticConnection=await resolveConnectionId(settings.semanticConnectionId,'',context?.connectionId||'',context?.userId);
-    const result=await spindle.generate.quiet({messages:prompts,tools:[semanticTool()],parameters:{temperature:settings.semanticTemperature,max_tokens:2400},connection_id:semanticConnection,reasoning:{source:'off'}});
+    const result=await spindle.generate.quiet({messages:prompts,tools:[semanticTool()],parameters:{temperature:settings.semanticTemperature,max_tokens:2400},connection_id:semanticConnection,reasoning:{source:'off'}},context?.userId||userByChat.get(String(context?.chatId||'')));
     const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_story_ledger') || result?.tool_calls?.[0];
     const payload=call?.args ?? parseJsonContent(result?.content);
     if(!payload) throw new Error('No structured semantic payload returned');
@@ -174,10 +187,11 @@ function projectResolution(baseState:StoryState,resolution:TurnResolution,settin
 function registerInterceptor(){
   if(interceptorRegistered || !has('interceptor')) return;
   spindle.registerInterceptor(async(messages:any[],context:any)=>{
-    const settings=await loadSettings();
+    const chatId=String(context?.chatId||'');
+    const scopedUserId=userForChat(chatId,context?.userId);
+    const settings=await loadSettings(scopedUserId);
     if(!settings.enabled || context?.dryRun===true || context?.generationType==='quiet' || context?.generationType==='impersonate') return messages;
-    const chatId=String(context?.chatId||''); if(!chatId) return messages;
-    if(context?.userId)activeChatByUser.set(String(context.userId),chatId);
+    if(!chatId) return messages;
     const rawUserText=lastUserText(messages); if(!rawUserText.trim()) return messages;
     const fingerprint=turnFingerprint(messages,rawUserText);
     let state=await loadState(chatId);
@@ -252,14 +266,15 @@ function registerGenerationEvents(){
 }
 
 async function finalizeGeneration(chatId:string,messageId:string,generationId:string,rawContent:string){
-  const settings=await loadSettings(); let state=await loadState(chatId); const resolution=state.pending;
+  const userId=userByChat.get(chatId);
+  const settings=await loadSettings(userId); let state=await loadState(chatId); const resolution=state.pending;
   if(!settings.enabled || !resolution) return;
   let content=stripStructuredArtifacts(rawContent);
   const findings=collectProseFindings(content,settings.proseGuardExtraPhrases);
   if(content!==rawContent && has('chat_mutation')) await spindle.chat.updateMessage(chatId,messageId,{content,metadata:{story_engine_sanitized:true}});
 
   if(settings.proseGuardMode==='automatic' && findings.length && has('generation') && has('chat_mutation')){
-    const repaired=await repairProse(content,findings,settings);
+    const repaired=await repairProse(content,findings,settings,userId);
     if(repaired && repaired!==content){ content=repaired; await spindle.chat.updateMessage(chatId,messageId,{content,metadata:{story_engine_prose_guard:'automatic'}}); }
     state.proseReview=null;
   }else if(settings.proseGuardMode==='review' && findings.length){
@@ -272,7 +287,7 @@ async function finalizeGeneration(chatId:string,messageId:string,generationId:st
 
   const notes=commitResolution(state,resolution,settings,chatId);
   if(settings.trackerPostPass && has('generation')){
-    try{ const delta=await extractPostTurnDelta(state,resolution,content,settings); applyPostTurnDelta(state,delta,notes); }
+    try{ const delta=await extractPostTurnDelta(state,resolution,content,settings,userId); applyPostTurnDelta(state,delta,notes); }
     catch(err){ notes.push(`Post-turn archivist skipped: ${String(err)}`); }
   }
   state.pending=null; state.lastResolution={...resolution,replay:false};
@@ -310,9 +325,9 @@ function commitResolution(state:StoryState,resolution:TurnResolution,settings:St
   return notes;
 }
 
-async function repairProse(content:string,findings:ProseFinding[],settings:StorySettings):Promise<string>{
+async function repairProse(content:string,findings:ProseFinding[],settings:StorySettings,userId?:string):Promise<string>{
   try{
-    const result=await spindle.generate.quiet({messages:[{role:'user',content:proseRepairPrompt(content,findings)}],parameters:{temperature:0.1,max_tokens:Math.max(600,Math.ceil(content.length/2))},connection_id:settings.proseGuardConnectionId||settings.semanticConnectionId||undefined,reasoning:{source:'off'}});
+    const result=await spindle.generate.quiet({messages:[{role:'user',content:proseRepairPrompt(content,findings)}],parameters:{temperature:0.1,max_tokens:Math.max(600,Math.ceil(content.length/2))},connection_id:settings.proseGuardConnectionId||settings.semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
     const repaired=stripStructuredArtifacts(String(result?.content||'')).trim();
     if(!repaired) return content;
     if(repaired.length<content.length*.55 || repaired.length>content.length*1.55) return content;
@@ -320,8 +335,8 @@ async function repairProse(content:string,findings:ProseFinding[],settings:Story
   }catch(err){spindle.log?.warn?.(`Prose repair failed: ${String(err)}`);return content;}
 }
 
-async function extractPostTurnDelta(state:StoryState,resolution:TurnResolution,narration:string,settings:StorySettings):Promise<any>{
-  const result=await spindle.generate.quiet({messages:buildPostTurnPrompt(state,resolution,narration),tools:[postTurnTool()],parameters:{temperature:0.1,max_tokens:1800},connection_id:settings.semanticConnectionId||undefined,reasoning:{source:'off'}});
+async function extractPostTurnDelta(state:StoryState,resolution:TurnResolution,narration:string,settings:StorySettings,userId?:string):Promise<any>{
+  const result=await spindle.generate.quiet({messages:buildPostTurnPrompt(state,resolution,narration),tools:[postTurnTool()],parameters:{temperature:0.1,max_tokens:1800},connection_id:settings.semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_post_turn_delta')||result?.tool_calls?.[0];
   return call?.args ?? parseJsonContent(result?.content) ?? {};
 }
@@ -357,7 +372,7 @@ function applyPostTurnDelta(state:StoryState,delta:any,notes:string[]){
 
 async function activeChatId(userId?:string,hint=''):Promise<string>{
   const explicit=String(hint||'').trim();
-  if(explicit){if(userId)activeChatByUser.set(userId,explicit);return explicit;}
+  if(explicit){if(userId){activeChatByUser.set(userId,explicit);userByChat.set(explicit,userId);}return explicit;}
   if(userId&&activeChatByUser.has(userId))return activeChatByUser.get(userId)!;
   try{
     const chat=await spindle.chats.getActive();
@@ -368,7 +383,7 @@ async function activeChatId(userId?:string,hint=''):Promise<string>{
 }
 function mapConnections(raw:any[]):any[]{return raw.map((c:any)=>({id:String(c.id||c.connection_id||''),name:String(c.name||c.label||c.model||c.id||'Connection'),provider:String(c.provider||''),model:String(c.model||''),isDefault:Boolean(c.is_default),hasApiKey:c.has_api_key!==false})).filter(c=>c.id);}
 async function dashboardPayload(userId?:string,hint=''){
-  const settings=await loadSettings(); const chatId=await activeChatId(userId,hint); const state=chatId?await loadState(chatId):createDefaultState();
+  const settings=await loadSettings(userId); const chatId=await activeChatId(userId,hint); const state=chatId?await loadState(chatId):createDefaultState();
   let connections:any[]=[]; try{const r=await spindle.connections.list(userId||undefined);connections=Array.isArray(r)?r:Array.isArray(r?.data)?r.data:[];}catch{}
   let persona:any=null;try{persona=await spindle.personas.getActive();}catch{}
   return {type:'dashboard',chatId,settings,state,connections:mapConnections(connections),capabilities:{chats:has('chats'),chatMutation:has('chat_mutation'),generation:has('generation'),personas:has('personas')},activePersona:persona?{id:persona.id,name:persona.name,title:persona.title,description:persona.description}:null};
@@ -380,7 +395,7 @@ async function sendDashboard(userId?:string,hint='',scheduleBootstrap=true){
 }
 function registerChatEvents(){
   if(chatEventsRegistered)return;
-  const handle=async(payload:any,userId?:string)=>{const id=String(payload?.chatId||'');if(userId){if(id)activeChatByUser.set(userId,id);else activeChatByUser.delete(userId);}await sendDashboard(userId,id,false);if(id){const settings=await loadSettings();const state=await loadState(id);if(settings.autoBootstrapExistingChat&&bootstrapEligible(state))void bootstrapExistingChat(id,userId,false);}};
+  const handle=async(payload:any,userId?:string)=>{const id=String(payload?.chatId||'');if(userId){if(id){activeChatByUser.set(userId,id);userByChat.set(id,userId);}else activeChatByUser.delete(userId);}await sendDashboard(userId,id,false);if(id){const settings=await loadSettings(userId);const state=await loadState(id);if(settings.autoBootstrapExistingChat&&bootstrapEligible(state))void bootstrapExistingChat(id,userId,false);}};
   spindle.on('CHAT_SWITCHED',handle);
   spindle.on('CHAT_CHANGED',handle);
   chatEventsRegistered=true;
@@ -392,7 +407,7 @@ function registerFrontend(){
     try{
       const type=String(payload?.type||''); const hint=String(payload?.chatId||'');
       if(type==='get_dashboard'){await sendDashboard(userId,hint);return;}
-      if(type==='save_settings'){const current=await loadSettings();await saveSettings(normalizeSettings({...current,...object(payload.settings)}));spindle.toast?.success?.('Story Engine settings saved.');await sendDashboard(userId,hint);return;}
+      if(type==='save_settings'){const current=await loadSettings(userId);await saveSettings(normalizeSettings({...current,...object(payload.settings)}),userId);spindle.toast?.success?.('Story Engine settings saved.');await sendDashboard(userId,hint);return;}
       const chatId=await activeChatId(userId,hint);
       if(type==='reset_chat_state'){if(!chatId)throw new Error('No active chat could be detected.');await saveState(chatId,createDefaultState());spindle.toast?.success?.('Story Engine state reset for this chat.');await sendDashboard(userId,chatId);return;}
       if(type==='create_player'){if(!chatId)throw new Error('No active chat could be detected.');await handleCreatePlayer(chatId,payload,userId);return;}
@@ -417,9 +432,9 @@ async function createAndSwitchStoryPersona(sheet:PlayerSheet,sourcePersona?:any)
 async function handleCreatePlayer(chatId:string,payload:any,userId:string){
   if(!has('generation'))throw new Error('generation permission is required.');
   const input=payload.input as CharacterDraftInput; const errors=validateCharacterInput(input);if(errors.length)throw new Error(errors.join(' '));
-  const settings=await loadSettings();
+  const settings=await loadSettings(userId);
   const personaConnection=await resolveConnectionId(settings.personaConnectionId,settings.semanticConnectionId,'',userId);
-  const result=await spindle.generate.quiet({messages:buildCharacterPrompt(input),tools:[characterTool()],parameters:{temperature:.35,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}});
+  const result=await spindle.generate.quiet({messages:buildCharacterPrompt(input),tools:[characterTool()],parameters:{temperature:.35,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_character_sheet')||result?.tool_calls?.[0]; const sheet=normalizeCharacterSheet(call?.args??parseJsonContent(result?.content)??{},input);
   const state=await loadState(chatId);applyPlayerToState(state,sheet);await saveState(chatId,state);
   if(payload.applyMode==='new_persona')await createAndSwitchStoryPersona(sheet);
@@ -428,9 +443,9 @@ async function handleCreatePlayer(chatId:string,payload:any,userId:string){
 async function handleConvertActivePersona(chatId:string,userId:string){
   if(!has('generation'))throw new Error('generation permission is required.');if(!has('personas'))throw new Error('personas permission is required.');
   const source=await spindle.personas.getActive();if(!source)throw new Error('No active persona is selected.');
-  const settings=await loadSettings();
+  const settings=await loadSettings(userId);
   const personaConnection=await resolveConnectionId(settings.personaConnectionId,settings.semanticConnectionId,'',userId);
-  const result=await spindle.generate.quiet({messages:buildPersonaConversionPrompt(source),tools:[characterTool()],parameters:{temperature:.25,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}});
+  const result=await spindle.generate.quiet({messages:buildPersonaConversionPrompt(source),tools:[characterTool()],parameters:{temperature:.25,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_character_sheet')||result?.tool_calls?.[0];const sheet=normalizeConvertedPersonaSheet(call?.args??parseJsonContent(result?.content)??{},source);
   const state=await loadState(chatId);applyPlayerToState(state,sheet);await saveState(chatId,state);
   const created=await createAndSwitchStoryPersona(sheet,source);
@@ -440,7 +455,7 @@ async function handleConvertActivePersona(chatId:string,userId:string){
 async function handleProgressionOptions(chatId:string,userId:string){
   const state=await loadState(chatId);if(!state.player)throw new Error('Create a player sheet first.');if(state.progression.pendingMilestones<=0)throw new Error('No progression milestone is pending.');
   const tool={name:'submit_progression_options',description:'Return three distinct ability options and three spell options suitable for the player progression milestone.',parameters:{type:'object',additionalProperties:false,properties:{abilities:{type:'array',minItems:3,maxItems:3,items:{type:'string'}},spells:{type:'array',minItems:3,maxItems:3,items:{type:'string'}}},required:['abilities','spells']}};
-  const result=await spindle.generate.quiet({messages:[{role:'system',content:'Design grounded progression choices for the existing character. Options should extend established themes without sudden unrelated powers. Abilities are useful capabilities, never automatic success. Spells should be bounded and setting-consistent. Call submit_progression_options once.'},{role:'user',content:renderPersonaDescription(state.player)}],tools:[tool],parameters:{temperature:.65,max_tokens:900},connection_id:(await loadSettings()).semanticConnectionId||undefined,reasoning:{source:'off'}});
+  const result=await spindle.generate.quiet({messages:[{role:'system',content:'Design grounded progression choices for the existing character. Options should extend established themes without sudden unrelated powers. Abilities are useful capabilities, never automatic success. Spells should be bounded and setting-consistent. Call submit_progression_options once.'},{role:'user',content:renderPersonaDescription(state.player)}],tools:[tool],parameters:{temperature:.65,max_tokens:900},connection_id:(await loadSettings(userId)).semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_progression_options')||result?.tool_calls?.[0];const o=object(call?.args??parseJsonContent(result?.content));spindle.sendToFrontend({type:'progression_options',abilities:Array.isArray(o.abilities)?o.abilities:[],spells:Array.isArray(o.spells)?o.spells:[]},userId);
 }
 
@@ -456,7 +471,7 @@ async function handleClaimMilestone(chatId:string,payload:any,userId:string){
 
 async function handleApplyProseSuggestion(chatId:string,payload:any,userId:string){
   const state=await loadState(chatId);const review=state.proseReview;if(!review)throw new Error('No prose review is pending.');if(!has('chat_mutation'))throw new Error('chat_mutation permission is required.');
-  const settings=await loadSettings();const repaired=review.suggested||await repairProse(review.content,review.findings,settings);if(repaired&&repaired!==review.content)await spindle.chat.updateMessage(chatId,review.messageId,{content:repaired,metadata:{story_engine_prose_guard:'review-applied'}});state.proseReview=null;await saveState(chatId,state);spindle.toast?.success?.('Prose repair applied.');await sendDashboard(userId);
+  const settings=await loadSettings(userId);const repaired=review.suggested||await repairProse(review.content,review.findings,settings,userId);if(repaired&&repaired!==review.content)await spindle.chat.updateMessage(chatId,review.messageId,{content:repaired,metadata:{story_engine_prose_guard:'review-applied'}});state.proseReview=null;await saveState(chatId,state);spindle.toast?.success?.('Prose repair applied.');await sendDashboard(userId);
 }
 
 function parseJsonContent(content:any):any|null{const s=String(content||'').trim();if(!s)return null;const candidates=[s,s.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'')];for(const c of candidates){try{return JSON.parse(c);}catch{}}const start=s.indexOf('{'),end=s.lastIndexOf('}');if(start>=0&&end>start){try{return JSON.parse(s.slice(start,end+1));}catch{}}return null;}
