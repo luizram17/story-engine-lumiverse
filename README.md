@@ -98,6 +98,10 @@ The main drawer tab itself is free and remains the primary UI if `ui_panels` is 
 
 For a subsystem-by-subsystem map against the upstream extension, see `PARITY_MATRIX.md`.
 
+## Operator-scoped compatibility
+
+Version 0.2.2 hardens user scoping for Lumiverse operator installations: active chat/persona discovery is resolved against the frontend user, direct assistant generations carry that same user scope, and `PERSONA_CHANGED` refreshes the conversion panel immediately. This prevents one user's active persona, connection, or assistant call from being resolved as an unscoped operator request.
+
 ## Compatibility note
 
 The implementation is designed against the Lumiverse Spindle APIs documented in August 2026: native prompt interceptors, direct quiet generation, persisted chat variables, personas, chat mutation, backend events, drawer tabs and float widgets. It deliberately does **not** depend on SillyTavern globals, `.mes` DOM selectors, `generate_interceptor`, connection-profile DOM state, or the SillyTavern Regex extension.

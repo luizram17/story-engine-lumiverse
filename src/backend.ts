@@ -18,6 +18,7 @@ import { applyMutationBatch, bootstrapAssistantPrompt, commandAssistantPrompt, e
 
 const pendingGenerationByChat = new Map<string, string>();
 const activeChatByUser = new Map<string, string>();
+const activePersonaByUser = new Map<string, any>();
 const userByChat = new Map<string, string>();
 const bootstrapInFlight = new Set<string>();
 let interceptorRegistered = false;
@@ -26,6 +27,49 @@ let frontendRegistered = false;
 let chatEventsRegistered = false;
 
 function has(permission:string):boolean { try { return spindle.permissions?.has ? spindle.permissions.has(permission) : true; } catch { return false; } }
+function errorMessage(err:any):string{return err instanceof Error?err.message:String(err||'');}
+async function quietForUser(input:any,userId?:string):Promise<any>{
+  if(!userId)return spindle.generate.quiet(input);
+  // Direct generation requests are user-scoped explicitly in operator installations.
+  // Current runtimes consume userId from the request object; retain a narrow fallback
+  // for older builds that accepted it as a second RPC argument.
+  try{return await spindle.generate.quiet({...input,userId});}
+  catch(err){
+    const msg=errorMessage(err);
+    // A few Lumiverse builds exposed operator scoping as a second RPC argument
+    // instead of a request field. Both failures happen before provider dispatch,
+    // so retrying the alternate wire shape is safe.
+    if(/userId is required for operator-scoped extensions|(?:unknown|unexpected|additional|unrecognized).{0,30}userId|too many arguments/i.test(msg)){
+      return spindle.generate.quiet(input,userId);
+    }
+    throw err;
+  }
+}
+async function getActivePersonaForUser(userId?:string):Promise<any|null>{
+  if(userId&&activePersonaByUser.has(userId))return activePersonaByUser.get(userId)??null;
+  try{
+    const persona=await spindle.personas.getActive(userId);
+    if(userId)activePersonaByUser.set(userId,persona??null);
+    return persona??null;
+  }catch(err){
+    // User-scoped/older runtimes infer owner and may not accept the optional argument.
+    try{const persona=await spindle.personas.getActive();if(userId)activePersonaByUser.set(userId,persona??null);return persona??null;}catch{return null;}
+  }
+}
+async function getPersonaForUser(personaId:string,userId?:string):Promise<any|null>{
+  if(!personaId)return null;
+  try{return await spindle.personas.get(personaId,userId);}catch{try{return await spindle.personas.get(personaId);}catch{return null;}}
+}
+async function createPersonaForUser(input:any,userId?:string):Promise<any>{
+  return userId?spindle.personas.create(input,userId):spindle.personas.create(input);
+}
+async function switchActivePersonaForUser(personaId:string|null,userId?:string):Promise<void>{
+  if(userId)await spindle.personas.switchActive(personaId,userId);else await spindle.personas.switchActive(personaId);
+  if(userId){if(personaId){const p=await getPersonaForUser(personaId,userId);activePersonaByUser.set(userId,p);}else activePersonaByUser.set(userId,null);}
+}
+async function updatePersonaForUser(personaId:string,input:any,userId?:string):Promise<any>{
+  return userId?spindle.personas.update(personaId,input,userId):spindle.personas.update(personaId,input);
+}
 
 async function loadSettings(userId?:string):Promise<StorySettings>{
   if(userId){
@@ -90,7 +134,7 @@ function storyDataContext(state:StoryState):string{
   return json.length<=36000?json:`${buildStateContext(state)}\n\n[Full state omitted from prompt because it is very large; use the tracker summary above.]`;
 }
 async function runMutationAssistant(messages:Array<{role:'system'|'user';content:string}>,toolName:string,connectionId:string,userId?:string):Promise<ReturnType<typeof normalizeMutationBatch>>{
-  const result=await spindle.generate.quiet({messages,tools:[mutationTool(toolName)],parameters:{temperature:0.05,max_tokens:3200},connection_id:connectionId||undefined,reasoning:{source:'off'}},userId);
+  const result=await quietForUser({messages,tools:[mutationTool(toolName)],parameters:{temperature:0.05,max_tokens:3200},connection_id:connectionId||undefined,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name===toolName)||result?.tool_calls?.[0];
   const payload=call?.args??parseJsonContent(result?.content);
   if(!payload)throw new Error(`No structured payload returned by ${toolName}.`);
@@ -132,7 +176,7 @@ async function bootstrapExistingChat(chatId:string,userId?:string,force=false):P
   await saveState(chatId,state);
   if(userId)await sendDashboard(userId,chatId,false);
   try{
-    let persona:any=null;try{persona=await spindle.personas.getActive();}catch{}
+    let persona:any=null;try{persona=await getActivePersonaForUser(userId);}catch{}
     const personaContext=persona?`Name: ${persona.name||''}\nTitle: ${persona.title||''}\nDescription:\n${persona.description||''}`:'';
     const chunks=splitTranscript(messages);
     for(let i=0;i<chunks.length;i++){
@@ -157,7 +201,7 @@ async function extractSemantic(messages:any[], context:any, settings:StorySettin
   const prompts=buildSemanticPrompt({userMessage:userText,history:compactHistory(messages,settings.recentMessageCount),stateContext:buildStateContext(state)});
   try{
     const semanticConnection=await resolveConnectionId(settings.semanticConnectionId,'',context?.connectionId||'',context?.userId);
-    const result=await spindle.generate.quiet({messages:prompts,tools:[semanticTool()],parameters:{temperature:settings.semanticTemperature,max_tokens:2400},connection_id:semanticConnection,reasoning:{source:'off'}},context?.userId||userByChat.get(String(context?.chatId||'')));
+    const result=await quietForUser({messages:prompts,tools:[semanticTool()],parameters:{temperature:settings.semanticTemperature,max_tokens:2400},connection_id:semanticConnection,reasoning:{source:'off'}},context?.userId||userByChat.get(String(context?.chatId||'')));
     const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_story_ledger') || result?.tool_calls?.[0];
     const payload=call?.args ?? parseJsonContent(result?.content);
     if(!payload) throw new Error('No structured semantic payload returned');
@@ -327,7 +371,7 @@ function commitResolution(state:StoryState,resolution:TurnResolution,settings:St
 
 async function repairProse(content:string,findings:ProseFinding[],settings:StorySettings,userId?:string):Promise<string>{
   try{
-    const result=await spindle.generate.quiet({messages:[{role:'user',content:proseRepairPrompt(content,findings)}],parameters:{temperature:0.1,max_tokens:Math.max(600,Math.ceil(content.length/2))},connection_id:settings.proseGuardConnectionId||settings.semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
+    const result=await quietForUser({messages:[{role:'user',content:proseRepairPrompt(content,findings)}],parameters:{temperature:0.1,max_tokens:Math.max(600,Math.ceil(content.length/2))},connection_id:settings.proseGuardConnectionId||settings.semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
     const repaired=stripStructuredArtifacts(String(result?.content||'')).trim();
     if(!repaired) return content;
     if(repaired.length<content.length*.55 || repaired.length>content.length*1.55) return content;
@@ -336,7 +380,7 @@ async function repairProse(content:string,findings:ProseFinding[],settings:Story
 }
 
 async function extractPostTurnDelta(state:StoryState,resolution:TurnResolution,narration:string,settings:StorySettings,userId?:string):Promise<any>{
-  const result=await spindle.generate.quiet({messages:buildPostTurnPrompt(state,resolution,narration),tools:[postTurnTool()],parameters:{temperature:0.1,max_tokens:1800},connection_id:settings.semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
+  const result=await quietForUser({messages:buildPostTurnPrompt(state,resolution,narration),tools:[postTurnTool()],parameters:{temperature:0.1,max_tokens:1800},connection_id:settings.semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_post_turn_delta')||result?.tool_calls?.[0];
   return call?.args ?? parseJsonContent(result?.content) ?? {};
 }
@@ -375,7 +419,7 @@ async function activeChatId(userId?:string,hint=''):Promise<string>{
   if(explicit){if(userId){activeChatByUser.set(userId,explicit);userByChat.set(explicit,userId);}return explicit;}
   if(userId&&activeChatByUser.has(userId))return activeChatByUser.get(userId)!;
   try{
-    const chat=await spindle.chats.getActive();
+    const chat=await spindle.chats.getActive(userId);
     const id=String(chat?.id||chat?.chat_id||'');
     if(userId){if(id)activeChatByUser.set(userId,id);else activeChatByUser.delete(userId);}
     return id;
@@ -385,7 +429,7 @@ function mapConnections(raw:any[]):any[]{return raw.map((c:any)=>({id:String(c.i
 async function dashboardPayload(userId?:string,hint=''){
   const settings=await loadSettings(userId); const chatId=await activeChatId(userId,hint); const state=chatId?await loadState(chatId):createDefaultState();
   let connections:any[]=[]; try{const r=await spindle.connections.list(userId||undefined);connections=Array.isArray(r)?r:Array.isArray(r?.data)?r.data:[];}catch{}
-  let persona:any=null;try{persona=await spindle.personas.getActive();}catch{}
+  let persona:any=null;try{persona=await getActivePersonaForUser(userId);}catch{}
   return {type:'dashboard',chatId,settings,state,connections:mapConnections(connections),capabilities:{chats:has('chats'),chatMutation:has('chat_mutation'),generation:has('generation'),personas:has('personas')},activePersona:persona?{id:persona.id,name:persona.name,title:persona.title,description:persona.description}:null};
 }
 async function sendDashboard(userId?:string,hint='',scheduleBootstrap=true){
@@ -398,6 +442,10 @@ function registerChatEvents(){
   const handle=async(payload:any,userId?:string)=>{const id=String(payload?.chatId||'');if(userId){if(id){activeChatByUser.set(userId,id);userByChat.set(id,userId);}else activeChatByUser.delete(userId);}await sendDashboard(userId,id,false);if(id){const settings=await loadSettings(userId);const state=await loadState(id);if(settings.autoBootstrapExistingChat&&bootstrapEligible(state))void bootstrapExistingChat(id,userId,false);}};
   spindle.on('CHAT_SWITCHED',handle);
   spindle.on('CHAT_CHANGED',handle);
+  spindle.on('PERSONA_CHANGED',async(payload:any,userId?:string)=>{
+    if(userId)activePersonaByUser.set(userId,payload?.persona??null);
+    await sendDashboard(userId,userId?activeChatByUser.get(userId)||'':'',false);
+  });
   chatEventsRegistered=true;
 }
 
@@ -423,10 +471,10 @@ function registerFrontend(){
   frontendRegistered=true;
 }
 
-async function createAndSwitchStoryPersona(sheet:PlayerSheet,sourcePersona?:any):Promise<any>{
+async function createAndSwitchStoryPersona(sheet:PlayerSheet,sourcePersona?:any,userId?:string):Promise<any>{
   if(!has('personas'))throw new Error('personas permission is required to create and select the converted persona.');
-  const created=await spindle.personas.create({name:sheet.name,title:`${sheet.race} · ${sheet.genre} · Story Engine`,description:renderPersonaDescription(sheet),folder:'Story Engine',is_narrator:false,attached_world_book_id:sourcePersona?.attached_world_book_id||undefined,metadata:{story_engine:{sheetVersion:2,statBuy:15,genre:sheet.genre,sourcePersonaId:sourcePersona?.id||null}}});
-  await spindle.personas.switchActive(created.id);
+  const created=await createPersonaForUser({name:sheet.name,title:`${sheet.race} · ${sheet.genre} · Story Engine`,description:renderPersonaDescription(sheet),folder:'Story Engine',is_narrator:false,attached_world_book_id:sourcePersona?.attached_world_book_id||undefined,metadata:{story_engine:{sheetVersion:2,statBuy:15,genre:sheet.genre,sourcePersonaId:sourcePersona?.id||null}}},userId);
+  await switchActivePersonaForUser(created.id,userId);
   return created;
 }
 async function handleCreatePlayer(chatId:string,payload:any,userId:string){
@@ -434,28 +482,28 @@ async function handleCreatePlayer(chatId:string,payload:any,userId:string){
   const input=payload.input as CharacterDraftInput; const errors=validateCharacterInput(input);if(errors.length)throw new Error(errors.join(' '));
   const settings=await loadSettings(userId);
   const personaConnection=await resolveConnectionId(settings.personaConnectionId,settings.semanticConnectionId,'',userId);
-  const result=await spindle.generate.quiet({messages:buildCharacterPrompt(input),tools:[characterTool()],parameters:{temperature:.35,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
+  const result=await quietForUser({messages:buildCharacterPrompt(input),tools:[characterTool()],parameters:{temperature:.35,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_character_sheet')||result?.tool_calls?.[0]; const sheet=normalizeCharacterSheet(call?.args??parseJsonContent(result?.content)??{},input);
   const state=await loadState(chatId);applyPlayerToState(state,sheet);await saveState(chatId,state);
-  if(payload.applyMode==='new_persona')await createAndSwitchStoryPersona(sheet);
+  if(payload.applyMode==='new_persona')await createAndSwitchStoryPersona(sheet,undefined,userId);
   spindle.toast?.success?.('Player sheet created.');spindle.sendToFrontend({type:'player_created',sheet},userId);await sendDashboard(userId,chatId);
 }
 async function handleConvertActivePersona(chatId:string,userId:string){
   if(!has('generation'))throw new Error('generation permission is required.');if(!has('personas'))throw new Error('personas permission is required.');
-  const source=await spindle.personas.getActive();if(!source)throw new Error('No active persona is selected.');
+  const source=await getActivePersonaForUser(userId);if(!source)throw new Error('No active persona is selected.');
   const settings=await loadSettings(userId);
   const personaConnection=await resolveConnectionId(settings.personaConnectionId,settings.semanticConnectionId,'',userId);
-  const result=await spindle.generate.quiet({messages:buildPersonaConversionPrompt(source),tools:[characterTool()],parameters:{temperature:.25,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
+  const result=await quietForUser({messages:buildPersonaConversionPrompt(source),tools:[characterTool()],parameters:{temperature:.25,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_character_sheet')||result?.tool_calls?.[0];const sheet=normalizeConvertedPersonaSheet(call?.args??parseJsonContent(result?.content)??{},source);
   const state=await loadState(chatId);applyPlayerToState(state,sheet);await saveState(chatId,state);
-  const created=await createAndSwitchStoryPersona(sheet,source);
+  const created=await createAndSwitchStoryPersona(sheet,source,userId);
   spindle.toast?.success?.(`Converted ${source.name} into a new Story Engine persona and selected it.`);spindle.sendToFrontend({type:'player_created',sheet,personaId:created.id},userId);await sendDashboard(userId,chatId);
 }
 
 async function handleProgressionOptions(chatId:string,userId:string){
   const state=await loadState(chatId);if(!state.player)throw new Error('Create a player sheet first.');if(state.progression.pendingMilestones<=0)throw new Error('No progression milestone is pending.');
   const tool={name:'submit_progression_options',description:'Return three distinct ability options and three spell options suitable for the player progression milestone.',parameters:{type:'object',additionalProperties:false,properties:{abilities:{type:'array',minItems:3,maxItems:3,items:{type:'string'}},spells:{type:'array',minItems:3,maxItems:3,items:{type:'string'}}},required:['abilities','spells']}};
-  const result=await spindle.generate.quiet({messages:[{role:'system',content:'Design grounded progression choices for the existing character. Options should extend established themes without sudden unrelated powers. Abilities are useful capabilities, never automatic success. Spells should be bounded and setting-consistent. Call submit_progression_options once.'},{role:'user',content:renderPersonaDescription(state.player)}],tools:[tool],parameters:{temperature:.65,max_tokens:900},connection_id:(await loadSettings(userId)).semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
+  const result=await quietForUser({messages:[{role:'system',content:'Design grounded progression choices for the existing character. Options should extend established themes without sudden unrelated powers. Abilities are useful capabilities, never automatic success. Spells should be bounded and setting-consistent. Call submit_progression_options once.'},{role:'user',content:renderPersonaDescription(state.player)}],tools:[tool],parameters:{temperature:.65,max_tokens:900},connection_id:(await loadSettings(userId)).semanticConnectionId||undefined,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_progression_options')||result?.tool_calls?.[0];const o=object(call?.args??parseJsonContent(result?.content));spindle.sendToFrontend({type:'progression_options',abilities:Array.isArray(o.abilities)?o.abilities:[],spells:Array.isArray(o.spells)?o.spells:[]},userId);
 }
 
@@ -465,7 +513,7 @@ async function handleClaimMilestone(chatId:string,payload:any,userId:string){
   const ability=text(payload.ability);if(!ability)throw new Error('Choose or enter one ability.');state.player.stats[stat as 'PHY']+=1;if(!state.player.abilities.some(a=>a.toLowerCase()===ability.toLowerCase()))state.player.abilities.push(ability);
   const spell=text(payload.spell);if(spell && state.player.spells.length<5 && !state.player.spells.some(s=>s.toLowerCase()===spell.toLowerCase()))state.player.spells.push(spell);
   state.progression.milestonesClaimed+=1;state.progression.pendingMilestones=Math.max(0,state.progression.pendingMilestones-1);state.progression.level+=1;increaseMilestoneHealth(state,Object.values(state.npcs).filter(n=>n.companion).map(n=>n.name));await saveState(chatId,state);
-  try{const persona=await spindle.personas.getActive();if(persona&&has('personas'))await spindle.personas.update(persona.id,{description:renderPersonaDescription(state.player),metadata:{...(persona.metadata||{}),story_engine:{sheetVersion:1,genre:state.player.genre,level:state.progression.level}}});}catch{}
+  try{const persona=await getActivePersonaForUser(userId);if(persona&&has('personas'))await updatePersonaForUser(persona.id,{description:renderPersonaDescription(state.player),metadata:{...(persona.metadata||{}),story_engine:{sheetVersion:1,genre:state.player.genre,level:state.progression.level}}},userId);}catch{}
   spindle.toast?.success?.(`Level ${state.progression.level} milestone applied.`);await sendDashboard(userId);
 }
 

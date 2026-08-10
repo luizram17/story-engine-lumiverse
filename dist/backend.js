@@ -14,6 +14,7 @@ import { applyPlayerToState, buildCharacterPrompt, buildPersonaConversionPrompt,
 import { applyMutationBatch, bootstrapAssistantPrompt, commandAssistantPrompt, extractOocCommands, mutationTool, normalizeMutationBatch, stripOocCommands } from './core/commands.js';
 const pendingGenerationByChat = new Map();
 const activeChatByUser = new Map();
+const activePersonaByUser = new Map();
 const userByChat = new Map();
 const bootstrapInFlight = new Set();
 let interceptorRegistered = false;
@@ -26,6 +27,84 @@ function has(permission) { try {
 catch {
     return false;
 } }
+function errorMessage(err) { return err instanceof Error ? err.message : String(err || ''); }
+async function quietForUser(input, userId) {
+    if (!userId)
+        return spindle.generate.quiet(input);
+    // Direct generation requests are user-scoped explicitly in operator installations.
+    // Current runtimes consume userId from the request object; retain a narrow fallback
+    // for older builds that accepted it as a second RPC argument.
+    try {
+        return await spindle.generate.quiet({ ...input, userId });
+    }
+    catch (err) {
+        const msg = errorMessage(err);
+        // A few Lumiverse builds exposed operator scoping as a second RPC argument
+        // instead of a request field. Both failures happen before provider dispatch,
+        // so retrying the alternate wire shape is safe.
+        if (/userId is required for operator-scoped extensions|(?:unknown|unexpected|additional|unrecognized).{0,30}userId|too many arguments/i.test(msg)) {
+            return spindle.generate.quiet(input, userId);
+        }
+        throw err;
+    }
+}
+async function getActivePersonaForUser(userId) {
+    if (userId && activePersonaByUser.has(userId))
+        return activePersonaByUser.get(userId) ?? null;
+    try {
+        const persona = await spindle.personas.getActive(userId);
+        if (userId)
+            activePersonaByUser.set(userId, persona ?? null);
+        return persona ?? null;
+    }
+    catch (err) {
+        // User-scoped/older runtimes infer owner and may not accept the optional argument.
+        try {
+            const persona = await spindle.personas.getActive();
+            if (userId)
+                activePersonaByUser.set(userId, persona ?? null);
+            return persona ?? null;
+        }
+        catch {
+            return null;
+        }
+    }
+}
+async function getPersonaForUser(personaId, userId) {
+    if (!personaId)
+        return null;
+    try {
+        return await spindle.personas.get(personaId, userId);
+    }
+    catch {
+        try {
+            return await spindle.personas.get(personaId);
+        }
+        catch {
+            return null;
+        }
+    }
+}
+async function createPersonaForUser(input, userId) {
+    return userId ? spindle.personas.create(input, userId) : spindle.personas.create(input);
+}
+async function switchActivePersonaForUser(personaId, userId) {
+    if (userId)
+        await spindle.personas.switchActive(personaId, userId);
+    else
+        await spindle.personas.switchActive(personaId);
+    if (userId) {
+        if (personaId) {
+            const p = await getPersonaForUser(personaId, userId);
+            activePersonaByUser.set(userId, p);
+        }
+        else
+            activePersonaByUser.set(userId, null);
+    }
+}
+async function updatePersonaForUser(personaId, input, userId) {
+    return userId ? spindle.personas.update(personaId, input, userId) : spindle.personas.update(personaId, input);
+}
 async function loadSettings(userId) {
     if (userId) {
         try {
@@ -137,7 +216,7 @@ function storyDataContext(state) {
     return json.length <= 36000 ? json : `${buildStateContext(state)}\n\n[Full state omitted from prompt because it is very large; use the tracker summary above.]`;
 }
 async function runMutationAssistant(messages, toolName, connectionId, userId) {
-    const result = await spindle.generate.quiet({ messages, tools: [mutationTool(toolName)], parameters: { temperature: 0.05, max_tokens: 3200 }, connection_id: connectionId || undefined, reasoning: { source: 'off' } }, userId);
+    const result = await quietForUser({ messages, tools: [mutationTool(toolName)], parameters: { temperature: 0.05, max_tokens: 3200 }, connection_id: connectionId || undefined, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === toolName) || result?.tool_calls?.[0];
     const payload = call?.args ?? parseJsonContent(result?.content);
     if (!payload)
@@ -210,7 +289,7 @@ async function bootstrapExistingChat(chatId, userId, force = false) {
     try {
         let persona = null;
         try {
-            persona = await spindle.personas.getActive();
+            persona = await getActivePersonaForUser(userId);
         }
         catch { }
         const personaContext = persona ? `Name: ${persona.name || ''}\nTitle: ${persona.title || ''}\nDescription:\n${persona.description || ''}` : '';
@@ -248,7 +327,7 @@ async function extractSemantic(messages, context, settings, state, userText) {
     const prompts = buildSemanticPrompt({ userMessage: userText, history: compactHistory(messages, settings.recentMessageCount), stateContext: buildStateContext(state) });
     try {
         const semanticConnection = await resolveConnectionId(settings.semanticConnectionId, '', context?.connectionId || '', context?.userId);
-        const result = await spindle.generate.quiet({ messages: prompts, tools: [semanticTool()], parameters: { temperature: settings.semanticTemperature, max_tokens: 2400 }, connection_id: semanticConnection, reasoning: { source: 'off' } }, context?.userId || userByChat.get(String(context?.chatId || '')));
+        const result = await quietForUser({ messages: prompts, tools: [semanticTool()], parameters: { temperature: settings.semanticTemperature, max_tokens: 2400 }, connection_id: semanticConnection, reasoning: { source: 'off' } }, context?.userId || userByChat.get(String(context?.chatId || '')));
         const call = result?.tool_calls?.find((x) => x?.name === 'submit_story_ledger') || result?.tool_calls?.[0];
         const payload = call?.args ?? parseJsonContent(result?.content);
         if (!payload)
@@ -483,7 +562,7 @@ function commitResolution(state, resolution, settings, chatId) {
 }
 async function repairProse(content, findings, settings, userId) {
     try {
-        const result = await spindle.generate.quiet({ messages: [{ role: 'user', content: proseRepairPrompt(content, findings) }], parameters: { temperature: 0.1, max_tokens: Math.max(600, Math.ceil(content.length / 2)) }, connection_id: settings.proseGuardConnectionId || settings.semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
+        const result = await quietForUser({ messages: [{ role: 'user', content: proseRepairPrompt(content, findings) }], parameters: { temperature: 0.1, max_tokens: Math.max(600, Math.ceil(content.length / 2)) }, connection_id: settings.proseGuardConnectionId || settings.semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
         const repaired = stripStructuredArtifacts(String(result?.content || '')).trim();
         if (!repaired)
             return content;
@@ -497,7 +576,7 @@ async function repairProse(content, findings, settings, userId) {
     }
 }
 async function extractPostTurnDelta(state, resolution, narration, settings, userId) {
-    const result = await spindle.generate.quiet({ messages: buildPostTurnPrompt(state, resolution, narration), tools: [postTurnTool()], parameters: { temperature: 0.1, max_tokens: 1800 }, connection_id: settings.semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
+    const result = await quietForUser({ messages: buildPostTurnPrompt(state, resolution, narration), tools: [postTurnTool()], parameters: { temperature: 0.1, max_tokens: 1800 }, connection_id: settings.semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === 'submit_post_turn_delta') || result?.tool_calls?.[0];
     return call?.args ?? parseJsonContent(result?.content) ?? {};
 }
@@ -620,7 +699,7 @@ async function activeChatId(userId, hint = '') {
     if (userId && activeChatByUser.has(userId))
         return activeChatByUser.get(userId);
     try {
-        const chat = await spindle.chats.getActive();
+        const chat = await spindle.chats.getActive(userId);
         const id = String(chat?.id || chat?.chat_id || '');
         if (userId) {
             if (id)
@@ -647,7 +726,7 @@ async function dashboardPayload(userId, hint = '') {
     catch { }
     let persona = null;
     try {
-        persona = await spindle.personas.getActive();
+        persona = await getActivePersonaForUser(userId);
     }
     catch { }
     return { type: 'dashboard', chatId, settings, state, connections: mapConnections(connections), capabilities: { chats: has('chats'), chatMutation: has('chat_mutation'), generation: has('generation'), personas: has('personas') }, activePersona: persona ? { id: persona.id, name: persona.name, title: persona.title, description: persona.description } : null };
@@ -679,6 +758,11 @@ function registerChatEvents() {
     } };
     spindle.on('CHAT_SWITCHED', handle);
     spindle.on('CHAT_CHANGED', handle);
+    spindle.on('PERSONA_CHANGED', async (payload, userId) => {
+        if (userId)
+            activePersonaByUser.set(userId, payload?.persona ?? null);
+        await sendDashboard(userId, userId ? activeChatByUser.get(userId) || '' : '', false);
+    });
     chatEventsRegistered = true;
 }
 function registerFrontend() {
@@ -770,11 +854,11 @@ function registerFrontend() {
     });
     frontendRegistered = true;
 }
-async function createAndSwitchStoryPersona(sheet, sourcePersona) {
+async function createAndSwitchStoryPersona(sheet, sourcePersona, userId) {
     if (!has('personas'))
         throw new Error('personas permission is required to create and select the converted persona.');
-    const created = await spindle.personas.create({ name: sheet.name, title: `${sheet.race} · ${sheet.genre} · Story Engine`, description: renderPersonaDescription(sheet), folder: 'Story Engine', is_narrator: false, attached_world_book_id: sourcePersona?.attached_world_book_id || undefined, metadata: { story_engine: { sheetVersion: 2, statBuy: 15, genre: sheet.genre, sourcePersonaId: sourcePersona?.id || null } } });
-    await spindle.personas.switchActive(created.id);
+    const created = await createPersonaForUser({ name: sheet.name, title: `${sheet.race} · ${sheet.genre} · Story Engine`, description: renderPersonaDescription(sheet), folder: 'Story Engine', is_narrator: false, attached_world_book_id: sourcePersona?.attached_world_book_id || undefined, metadata: { story_engine: { sheetVersion: 2, statBuy: 15, genre: sheet.genre, sourcePersonaId: sourcePersona?.id || null } } }, userId);
+    await switchActivePersonaForUser(created.id, userId);
     return created;
 }
 async function handleCreatePlayer(chatId, payload, userId) {
@@ -786,14 +870,14 @@ async function handleCreatePlayer(chatId, payload, userId) {
         throw new Error(errors.join(' '));
     const settings = await loadSettings(userId);
     const personaConnection = await resolveConnectionId(settings.personaConnectionId, settings.semanticConnectionId, '', userId);
-    const result = await spindle.generate.quiet({ messages: buildCharacterPrompt(input), tools: [characterTool()], parameters: { temperature: .35, max_tokens: 2200 }, connection_id: personaConnection, reasoning: { source: 'off' } }, userId);
+    const result = await quietForUser({ messages: buildCharacterPrompt(input), tools: [characterTool()], parameters: { temperature: .35, max_tokens: 2200 }, connection_id: personaConnection, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === 'submit_character_sheet') || result?.tool_calls?.[0];
     const sheet = normalizeCharacterSheet(call?.args ?? parseJsonContent(result?.content) ?? {}, input);
     const state = await loadState(chatId);
     applyPlayerToState(state, sheet);
     await saveState(chatId, state);
     if (payload.applyMode === 'new_persona')
-        await createAndSwitchStoryPersona(sheet);
+        await createAndSwitchStoryPersona(sheet, undefined, userId);
     spindle.toast?.success?.('Player sheet created.');
     spindle.sendToFrontend({ type: 'player_created', sheet }, userId);
     await sendDashboard(userId, chatId);
@@ -803,18 +887,18 @@ async function handleConvertActivePersona(chatId, userId) {
         throw new Error('generation permission is required.');
     if (!has('personas'))
         throw new Error('personas permission is required.');
-    const source = await spindle.personas.getActive();
+    const source = await getActivePersonaForUser(userId);
     if (!source)
         throw new Error('No active persona is selected.');
     const settings = await loadSettings(userId);
     const personaConnection = await resolveConnectionId(settings.personaConnectionId, settings.semanticConnectionId, '', userId);
-    const result = await spindle.generate.quiet({ messages: buildPersonaConversionPrompt(source), tools: [characterTool()], parameters: { temperature: .25, max_tokens: 2200 }, connection_id: personaConnection, reasoning: { source: 'off' } }, userId);
+    const result = await quietForUser({ messages: buildPersonaConversionPrompt(source), tools: [characterTool()], parameters: { temperature: .25, max_tokens: 2200 }, connection_id: personaConnection, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === 'submit_character_sheet') || result?.tool_calls?.[0];
     const sheet = normalizeConvertedPersonaSheet(call?.args ?? parseJsonContent(result?.content) ?? {}, source);
     const state = await loadState(chatId);
     applyPlayerToState(state, sheet);
     await saveState(chatId, state);
-    const created = await createAndSwitchStoryPersona(sheet, source);
+    const created = await createAndSwitchStoryPersona(sheet, source, userId);
     spindle.toast?.success?.(`Converted ${source.name} into a new Story Engine persona and selected it.`);
     spindle.sendToFrontend({ type: 'player_created', sheet, personaId: created.id }, userId);
     await sendDashboard(userId, chatId);
@@ -826,7 +910,7 @@ async function handleProgressionOptions(chatId, userId) {
     if (state.progression.pendingMilestones <= 0)
         throw new Error('No progression milestone is pending.');
     const tool = { name: 'submit_progression_options', description: 'Return three distinct ability options and three spell options suitable for the player progression milestone.', parameters: { type: 'object', additionalProperties: false, properties: { abilities: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'string' } }, spells: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'string' } } }, required: ['abilities', 'spells'] } };
-    const result = await spindle.generate.quiet({ messages: [{ role: 'system', content: 'Design grounded progression choices for the existing character. Options should extend established themes without sudden unrelated powers. Abilities are useful capabilities, never automatic success. Spells should be bounded and setting-consistent. Call submit_progression_options once.' }, { role: 'user', content: renderPersonaDescription(state.player) }], tools: [tool], parameters: { temperature: .65, max_tokens: 900 }, connection_id: (await loadSettings(userId)).semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
+    const result = await quietForUser({ messages: [{ role: 'system', content: 'Design grounded progression choices for the existing character. Options should extend established themes without sudden unrelated powers. Abilities are useful capabilities, never automatic success. Spells should be bounded and setting-consistent. Call submit_progression_options once.' }, { role: 'user', content: renderPersonaDescription(state.player) }], tools: [tool], parameters: { temperature: .65, max_tokens: 900 }, connection_id: (await loadSettings(userId)).semanticConnectionId || undefined, reasoning: { source: 'off' } }, userId);
     const call = result?.tool_calls?.find((x) => x?.name === 'submit_progression_options') || result?.tool_calls?.[0];
     const o = object(call?.args ?? parseJsonContent(result?.content));
     spindle.sendToFrontend({ type: 'progression_options', abilities: Array.isArray(o.abilities) ? o.abilities : [], spells: Array.isArray(o.spells) ? o.spells : [] }, userId);
@@ -857,9 +941,9 @@ async function handleClaimMilestone(chatId, payload, userId) {
     increaseMilestoneHealth(state, Object.values(state.npcs).filter(n => n.companion).map(n => n.name));
     await saveState(chatId, state);
     try {
-        const persona = await spindle.personas.getActive();
+        const persona = await getActivePersonaForUser(userId);
         if (persona && has('personas'))
-            await spindle.personas.update(persona.id, { description: renderPersonaDescription(state.player), metadata: { ...(persona.metadata || {}), story_engine: { sheetVersion: 1, genre: state.player.genre, level: state.progression.level } } });
+            await updatePersonaForUser(persona.id, { description: renderPersonaDescription(state.player), metadata: { ...(persona.metadata || {}), story_engine: { sheetVersion: 1, genre: state.player.genre, level: state.progression.level } } }, userId);
     }
     catch { }
     spindle.toast?.success?.(`Level ${state.progression.level} milestone applied.`);

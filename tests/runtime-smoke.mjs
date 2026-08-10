@@ -6,6 +6,9 @@ const events = new Map();
 let interceptor = null;
 let frontendHandler = null;
 let activeChatUserId = null;
+let activePersonaUserId = null;
+let personaCreateUserId = null;
+let personaSwitchUserId = null;
 let connectionListUserId = null;
 let lastFrontendPayload = null;
 const messageUpdates = [];
@@ -46,13 +49,19 @@ globalThis.spindle = {
   sendToFrontend:(payload)=>{lastFrontendPayload=payload;},
   chats:{getActive:async(userId)=>{activeChatUserId=userId;return{id:'chat-smoke',name:'Smoke',userId};}},
   connections:{list:async(userId)=>{connectionListUserId=userId;return[{id:'profile-1',name:'Assistant',provider:'openai',model:'gpt-test',is_default:true,has_api_key:true}];},get:async(id)=>({id,name:'Assistant',provider:'openai',model:'gpt-test',has_api_key:true})},
-  personas:{getActive:async()=>activePersona,create:async(input)=>{const p={id:`persona-${createdPersonas.length+1}`,...input};createdPersonas.push(p);return p;},switchActive:async(id)=>{switchedPersonaId=id;if(id){const found=createdPersonas.find(p=>p.id===id);if(found)activePersona=found;}},update:async()=>{personaUpdateCalls++;}},
+  personas:{
+    getActive:async(userId)=>{activePersonaUserId=userId;if(!userId)throw new Error('userId is required for operator-scoped extensions');return activePersona;},
+    get:async(id,userId)=>{if(!userId)throw new Error('userId is required for operator-scoped extensions');return createdPersonas.find(p=>p.id===id)|| (activePersona?.id===id?activePersona:null);},
+    create:async(input,userId)=>{personaCreateUserId=userId;if(!userId)throw new Error('userId is required for operator-scoped extensions');const p={id:`persona-${createdPersonas.length+1}`,...input};createdPersonas.push(p);return p;},
+    switchActive:async(id,userId)=>{personaSwitchUserId=userId;if(!userId)throw new Error('userId is required for operator-scoped extensions');switchedPersonaId=id;if(id){const found=createdPersonas.find(p=>p.id===id);if(found)activePersona=found;}},
+    update:async(_id,_input,userId)=>{if(!userId)throw new Error('userId is required for operator-scoped extensions');personaUpdateCalls++;}
+  },
   chat:{
     updateMessage:async(chatId,messageId,patch)=>{messageUpdates.push({chatId,messageId,patch});},
     appendMessage:async()=>({}),
     getMessages:async()=>[{id:'h1',role:'user',content:'We arrive in Emberfall.'},{id:'h2',role:'assistant',content:'Mira, your childhood best friend, greets you at the gate.'},{id:'h3',role:'user',content:'I hug Mira.'}],
   },
-  generate:{quiet:async(req,userId)=>{quietUserIds.push(userId);const system=String(req?.messages?.[0]?.content||'');if(system.includes("Command Assistant"))return{tool_calls:[{name:'apply_story_state_changes',args:{summary:'Moved the scene.',operations:[{op:'set',path:['world','location'],value:'Commanded Place'}]}}]};if(system.includes("History Import Assistant"))return{tool_calls:[{name:'apply_story_history_import',args:{summary:'Imported established history.',operations:[{op:'set',path:['world','location'],value:'Emberfall'},{op:'merge',path:['npcs','Mira'],value:{name:'Mira',role:'companion',rank:'Average',bond:4,companion:true,relationshipDescriptors:['childhood best friend'],personalitySummary:'Old and trusted friend.'}}]}}]};if(system.includes('CURRENT LUMIVERSE PERSONA'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Old Hero',race:'Human',genre:'Fantasy',appearance:'Nimble veteran scout',stats:{PHY:6,MND:5,CHA:4},naturalWeapons:[],abilities:['Scouting','Archery'],spells:[],inventory:['Bow'],currency:[],gear:['Travel cloak'],anchors:['Veteran scout'],concept:'Scout',backstory:'Experienced traveler'}}]};return{content:''};}},
+  generate:{quiet:async(req)=>{const userId=req?.userId;quietUserIds.push(userId);if(!userId)throw new Error('userId is required for operator-scoped extensions');const system=String(req?.messages?.[0]?.content||'');if(system.includes("Command Assistant"))return{tool_calls:[{name:'apply_story_state_changes',args:{summary:'Moved the scene.',operations:[{op:'set',path:['world','location'],value:'Commanded Place'}]}}]};if(system.includes("History Import Assistant"))return{tool_calls:[{name:'apply_story_history_import',args:{summary:'Imported established history.',operations:[{op:'set',path:['world','location'],value:'Emberfall'},{op:'merge',path:['npcs','Mira'],value:{name:'Mira',role:'companion',rank:'Average',bond:4,companion:true,relationshipDescriptors:['childhood best friend'],personalitySummary:'Old and trusted friend.'}}]}}]};if(system.includes('CURRENT LUMIVERSE PERSONA'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Old Hero',race:'Human',genre:'Fantasy',appearance:'Nimble veteran scout',stats:{PHY:6,MND:5,CHA:4},naturalWeapons:[],abilities:['Scouting','Archery'],spells:[],inventory:['Bow'],currency:[],gear:['Travel cloak'],anchors:['Veteran scout'],concept:'Scout',backstory:'Experienced traveler'}}]};if(system.includes('Create a concise player character sheet'))return{tool_calls:[{name:'submit_character_sheet',args:{name:'Manual Hero',race:'Human',genre:'Fantasy',appearance:'A road-worn traveler',stats:{PHY:5,MND:5,CHA:5},naturalWeapons:[],abilities:['Travel'],spells:[],inventory:['Rope'],currency:[],gear:['Travel clothes'],anchors:['Practical traveler'],concept:'Traveler',backstory:'Has spent years on the road.'}}]};return{content:''};}},
   log:{info:()=>{},warn:()=>{},error:()=>{}},
   toast:{success:()=>{},error:()=>{}},
 };
@@ -62,9 +71,12 @@ assert.equal(typeof interceptor,'function','backend did not register interceptor
 assert.equal(typeof frontendHandler,'function','backend did not register frontend bridge');
 assert.equal(typeof events.get('GENERATION_ENDED'),'function','backend did not register generation finalizer');
 assert.equal(typeof events.get('CHAT_SWITCHED'),'function','backend did not register chat switch tracking');
+assert.equal(typeof events.get('PERSONA_CHANGED'),'function','backend did not register persona-change tracking');
 await frontendHandler({type:'get_dashboard'},'user-smoke');
-assert.equal(activeChatUserId,undefined,'dashboard should use host-scoped getActive() and rely on frontend/event hints for user routing');
+assert.equal(activeChatUserId,'user-smoke','dashboard did not scope active-chat lookup to the originating user');
 assert.equal(connectionListUserId,'user-smoke','dashboard did not list connections in user scope');
+assert.equal(activePersonaUserId,'user-smoke','dashboard did not scope active-persona lookup to the originating user');
+assert.equal(lastFrontendPayload?.activePersona?.id,'persona-old','dashboard failed to expose the active persona');
 assert.equal(lastFrontendPayload?.chatId,'chat-smoke');
 assert.equal(lastFrontendPayload?.connections?.[0]?.model,'gpt-test');
 
@@ -114,15 +126,30 @@ assert.equal(state.npcs.Mira.bond,4);
 assert.deepEqual(state.npcs.Mira.relationshipDescriptors,['childhood best friend']);
 assert.ok(state.health.npcs.Mira);
 
+// Manual character creation also keeps the operator user scope on its assistant generation.
+await frontendHandler({type:'create_player',chatId:'chat-smoke',applyMode:'state_only',input:{name:'Manual Hero',race:'Human',genre:'Fantasy',concept:'Traveler',appearance:'A road-worn traveler',backstory:'Has spent years on the road.',stats:{PHY:5,MND:5,CHA:5},desiredAbilities:'Travel',desiredSpells:'',inventory:'Rope',anchors:'Practical traveler'}},'user-smoke');
+state=JSON.parse(chatStore.get('chat-smoke|story_engine_state_v7'));
+assert.equal(state.player.name,'Manual Hero');
+assert.equal(state.player.stats.PHY+state.player.stats.MND+state.player.stats.CHA,15);
+assert.equal(quietUserIds.at(-1),'user-smoke','manual character generation lost operator user scope');
+
 // AI conversion creates and selects a new persona; the source persona is not overwritten.
 activePersona={id:'persona-old',name:'Old Hero',title:'Veteran',description:'A nimble veteran scout with a bow.',attached_world_book_id:'wb-1'};
 await frontendHandler({type:'convert_active_persona',chatId:'chat-smoke'},'user-smoke');
 assert.equal(personaUpdateCalls,0);
 assert.equal(createdPersonas.length,1);
 assert.equal(switchedPersonaId,createdPersonas[0].id);
+assert.equal(personaCreateUserId,'user-smoke','persona creation lost operator user scope');
+assert.equal(personaSwitchUserId,'user-smoke','persona switching lost operator user scope');
 assert.equal(createdPersonas[0].attached_world_book_id,'wb-1');
 state=JSON.parse(chatStore.get('chat-smoke|story_engine_state_v7'));
 assert.equal(state.player.stats.PHY+state.player.stats.MND+state.player.stats.CHA,15);
 assert.ok(quietUserIds.filter(Boolean).every(id=>id==='user-smoke'),'quiet generation leaked or lost operator user scope');
+
+// Persona changes refresh the cached active persona exposed by the dashboard.
+const eventPersona={id:'persona-event',name:'Event Hero',title:'Current',description:'Selected in the Lumiverse persona picker.'};
+activePersona=eventPersona;
+await events.get('PERSONA_CHANGED')({persona:eventPersona},'user-smoke');
+assert.equal(lastFrontendPayload?.activePersona?.id,'persona-event','persona-change event did not refresh the active persona');
 
 console.log('Story Engine Spindle runtime smoke passed');

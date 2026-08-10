@@ -118,9 +118,10 @@ export function setup(ctx) {
     const unsubGen = ctx.events.on('GENERATION_ENDED', () => setTimeout(() => request('get_dashboard'), 250));
     const unsubChat = ctx.events.on('CHAT_SWITCHED', (payload) => { chatHint = String(payload?.chatId || ''); request('get_dashboard', { chatId: chatHint }); });
     const unsubChatChanged = ctx.events.on('CHAT_CHANGED', (payload) => { chatHint = String(payload?.chatId || chatHint || ''); request('get_dashboard', { chatId: chatHint }); });
+    const unsubPersona = ctx.events.on('PERSONA_CHANGED', () => request('get_dashboard', { chatId: chatHint }));
     const unsubActivate = tab.onActivate(() => request('get_dashboard'));
     request('get_dashboard');
-    return () => { unsubBackend(); unsubGen(); unsubChat(); unsubChatChanged(); unsubActivate(); unsubAction(); inputAction.destroy(); widget?.destroy?.(); tab.destroy(); removeStyle(); ctx.dom.cleanup(); };
+    return () => { unsubBackend(); unsubGen(); unsubChat(); unsubChatChanged(); unsubPersona(); unsubActivate(); unsubAction(); inputAction.destroy(); widget?.destroy?.(); tab.destroy(); removeStyle(); ctx.dom.cleanup(); };
 }
 function renderOverview(s, settings, p, busy) {
     const h = s.health?.user;
