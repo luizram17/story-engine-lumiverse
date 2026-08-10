@@ -80,3 +80,6 @@ An empty selector no longer means “hope the host has a current connection”. 
 
 ### 20. Unknown presence never clears known presence
 Current-scene NPC presence is a complete list when the semantic/post-turn assistant actually supplies it. Conservative/local semantic fallback leaves presence unspecified instead of treating “unknown” as an empty room; v7 states also recover NPCs seen on the current turn during migration.
+
+### 17. Redundant active-chat resolution
+Manual UI actions no longer rely on a single backend lookup. Operator-scoped `spindle.chats.getActive(userId)` is authoritative; the frontend independently reads Lumiverse's persisted `activeChatId` setting and forwards chat IDs seen in `CHAT_SWITCHED`, message-render, message-sent, generation, and settings events. A transient null lookup never erases a valid cached hint.

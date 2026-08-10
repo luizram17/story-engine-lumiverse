@@ -7,6 +7,7 @@ export function setup(ctx) {
     let progressionOptions = null;
     let busy = '';
     let chatHint = '';
+    let personaHint = '';
     const removeStyle = ctx.dom.addStyle(`
     .se-shell{padding:12px 12px 28px;display:flex;flex-direction:column;gap:12px;color:var(--lumiverse-text);font-size:13px}
     .se-hero{padding:14px;border:1px solid var(--lumiverse-border);background:var(--lumiverse-fill-subtle);border-radius:12px}
@@ -31,7 +32,56 @@ export function setup(ctx) {
     catch { }
     const inputAction = ctx.ui.registerInputBarAction({ id: 'open-story-engine', label: 'Open Story Engine', iconSvg, enabled: true });
     const unsubAction = inputAction.onClick(() => tab.activate());
-    function request(type, extra = {}) { ctx.sendToBackend({ type, chatId: dashboard?.chatId || chatHint || '', ...extra }); }
+    async function readHostSettingId(key) {
+        try {
+            const response = await fetch(`/api/v1/settings/${encodeURIComponent(key)}`, { method: 'GET', credentials: 'same-origin', headers: { Accept: 'application/json' } });
+            if (response.ok) {
+                const data = await response.json();
+                let value = data?.value ?? data?.data?.value ?? data?.setting?.value ?? data;
+                if (typeof value === 'string') {
+                    const raw = value.trim();
+                    try {
+                        const parsed = JSON.parse(raw);
+                        if (typeof parsed === 'string')
+                            value = parsed;
+                    }
+                    catch { }
+                    const id = String(value || '').trim();
+                    if (id && id !== 'null' && id !== 'undefined')
+                        return id;
+                }
+            }
+        }
+        catch { }
+        return '';
+    }
+    async function readHostActiveChatId() {
+        if (chatHint)
+            return chatHint;
+        const id = await readHostSettingId('activeChatId');
+        if (id) {
+            chatHint = id;
+            return id;
+        }
+        return String(dashboard?.chatId || '').trim();
+    }
+    async function readHostActivePersonaId() {
+        if (personaHint)
+            return personaHint;
+        const id = await readHostSettingId('activePersonaId');
+        if (id) {
+            personaHint = id;
+            return id;
+        }
+        return String(dashboard?.activePersona?.id || '').trim();
+    }
+    async function request(type, extra = {}) {
+        const supplied = String(extra?.chatId || dashboard?.chatId || chatHint || '').trim();
+        const chatId = supplied || await readHostActiveChatId();
+        const suppliedPersona = String(extra?.personaId || dashboard?.activePersona?.id || personaHint || '').trim();
+        const personaId = suppliedPersona || await readHostActivePersonaId();
+        ctx.sendToBackend({ type, ...extra, chatId: String(extra?.chatId || chatId || ''), personaId: String(extra?.personaId || personaId || '') });
+    }
     function setBusy(value) { busy = value; render(); }
     function render() {
         const root = tab.root;
@@ -144,14 +194,28 @@ export function setup(ctx) {
         busy = '';
         render();
     } });
-    const unsubGen = ctx.events.on('GENERATION_ENDED', () => setTimeout(() => request('get_dashboard'), 250));
+    const rememberChat = (payload) => { const id = String(payload?.chatId || '').trim(); if (id)
+        chatHint = id; return id; };
+    const unsubGen = ctx.events.on('GENERATION_ENDED', (payload) => { rememberChat(payload); setTimeout(() => request('get_dashboard'), 250); });
     const unsubChat = ctx.events.on('CHAT_SWITCHED', (payload) => { chatHint = String(payload?.chatId || ''); request('get_dashboard', { chatId: chatHint }); });
     const unsubChatChanged = ctx.events.on('CHAT_CHANGED', (payload) => { const changed = String(payload?.chatId || ''); if (!chatHint || !changed || changed === chatHint)
         request('get_dashboard', { chatId: chatHint }); });
-    const unsubPersona = ctx.events.on('PERSONA_CHANGED', () => request('get_dashboard', { chatId: chatHint }));
+    const unsubMessageSent = ctx.events.on('MESSAGE_SENT', (payload) => { if (rememberChat(payload))
+        request('get_dashboard', { chatId: chatHint }); });
+    const unsubUserRendered = ctx.events.on('USER_MESSAGE_RENDERED', (payload) => { rememberChat(payload); });
+    const unsubCharacterRendered = ctx.events.on('CHARACTER_MESSAGE_RENDERED', (payload) => { rememberChat(payload); });
+    const unsubSettings = ctx.events.on('SETTINGS_UPDATED', (payload) => { const key = String(payload?.key || ''); if (key === 'activeChatId') {
+        chatHint = String(payload?.value || '');
+        request('get_dashboard', { chatId: chatHint });
+    }
+    else if (key === 'activePersonaId') {
+        personaHint = String(payload?.value || '');
+        request('get_dashboard', { chatId: chatHint, personaId: personaHint });
+    } });
+    const unsubPersona = ctx.events.on('PERSONA_CHANGED', (payload) => { personaHint = String(payload?.persona?.id || payload?.id || ''); request('get_dashboard', { chatId: chatHint, personaId: personaHint }); });
     const unsubActivate = tab.onActivate(() => request('get_dashboard'));
     request('get_dashboard');
-    return () => { unsubBackend(); unsubGen(); unsubChat(); unsubChatChanged(); unsubPersona(); unsubActivate(); unsubAction(); inputAction.destroy(); widget?.destroy?.(); tab.destroy(); removeStyle(); ctx.dom.cleanup(); };
+    return () => { unsubBackend(); unsubGen(); unsubChat(); unsubChatChanged(); unsubMessageSent(); unsubUserRendered(); unsubCharacterRendered(); unsubSettings(); unsubPersona(); unsubActivate(); unsubAction(); inputAction.destroy(); widget?.destroy?.(); tab.destroy(); removeStyle(); ctx.dom.cleanup(); };
 }
 function renderOverview(s, settings, p, busy) {
     const h = s.health?.user;

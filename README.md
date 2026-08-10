@@ -86,20 +86,18 @@ The extension requests these permissions:
 
 The main drawer tab itself is free and remains the primary UI if `ui_panels` is not granted. Connection discovery is covered by the `generation` permission.
 
-## Automatic chat attachment
+## Chat attachment and detection
 
-Story Engine attaches silently to the currently open chat as soon as its frontend/backend context is available. It does **not** send a synthetic “start adventure” message and does not require a separate adventure-start state. Existing chats can be reconstructed from their saved canonical history; new/short chats are simply marked attached and the next real user turn enters the normal pipeline.
+Story Engine attaches to the Lumiverse chat that is currently open; there is no Start Adventure step and it never injects a synthetic user message just to initialize itself. For operator-scoped installs, the backend resolves the current chat with the originating `userId`. The frontend also reads Lumiverse's persisted `activeChatId` setting as an independent fallback and forwards chat IDs observed in chat/message lifecycle events. This redundancy is intentional: manual actions such as character creation and history import must work even when the extension worker was started after the original `CHAT_SWITCHED` event.
 
-Attachment itself never requires an LLM connection profile. AI-assisted features resolve a configured/default usable profile before dispatch; semantic preflight falls back conservatively when none exists, while explicit AI actions such as persona conversion, OOC mutation, history re-import, or progression return a Story Engine-specific configuration error instead of triggering an implicit broken generation.
-
-The floating player HUD shows HP, level/XP, stats, money, inventory, equipment, abilities, spells, scene information, and the NPCs currently established as physically present. NPC presence is tracked separately from the full historical NPC tracker, so off-screen characters do not clutter the scene list.
+If the HUD says **No active chat** while a chat is visibly open, refresh the Story Engine panel once. If it still cannot attach, treat that as a host-integration bug and capture the toast/server log rather than resetting Story Engine state.
 
 ## First use
 
 1. Open a chat.
 2. Open **Story Engine** from the drawer or input-bar Extras menu.
 3. In **Character**, create or convert the active persona. PHY + MND + CHA must total 15.
-4. In **Settings**, choose any of your Lumiverse Connection profiles independently for Semantic, Persona Conversion, OOC Commands, History Import, and Prose Guard. Leaving a selector empty uses automatic resolution: the configured semantic profile when applicable, otherwise the user's default usable profile, then the first usable profile. Missing or keyless saved profiles fall back safely.
+4. In **Settings**, choose any of your Lumiverse Connection profiles independently for Semantic, Persona Conversion, OOC Commands, History Import, and Prose Guard. Leaving a selector empty inherits the semantic/current connection; missing or unusable saved profiles fall back safely.
 5. Keep Prose Guard on **Review** first. Once you like its behavior, switch to Automatic if desired.
 6. Roleplay normally. Any `((double-parenthesis))` clauses are treated as OOC administrative commands, applied to Story Engine state, and removed from the IC prompt. Mechanical information is available in Tracker/Audit, but the narrator only receives a prose-safe outcome handoff.
 7. If the chat already contained messages before Story Engine was enabled, the extension can import the full saved history automatically or through **Import existing history now** and reconstruct established NPCs, relationships, inventory, world state, and continuity.
@@ -108,7 +106,7 @@ For a subsystem-by-subsystem map against the upstream extension, see `PARITY_MAT
 
 ## Operator-scoped compatibility
 
-Version 0.2.3 aligns host integration with the current Spindle contracts: active chat/persona discovery uses the host's contextual `getActive()` APIs, connection-profile discovery is explicitly scoped to the originating operator user, assistant calls always carry a resolved `connection_id`, and `PERSONA_CHANGED` refreshes the conversion panel immediately. Chat-change notifications are no longer mistaken for chat switches.
+Version 0.2.2 hardens user scoping for Lumiverse operator installations: active chat/persona discovery is resolved against the frontend user, direct assistant generations carry that same user scope, and `PERSONA_CHANGED` refreshes the conversion panel immediately. This prevents one user's active persona, connection, or assistant call from being resolved as an unscoped operator request.
 
 ## Compatibility note
 

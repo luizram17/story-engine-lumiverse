@@ -36,11 +36,12 @@ async function quietForUser(input:any,_userId?:string):Promise<any>{
 }
 async function getActivePersonaForUser(userId?:string):Promise<any|null>{
   try{
-    // Always ask the host first. The cache is only a resilience fallback if the
-    // active-persona query temporarily fails; it is never the source of truth.
     const persona=await spindle.personas.getActive();
-    if(userId)activePersonaByUser.set(userId,persona??null);
-    return persona??null;
+    if(persona){if(userId)activePersonaByUser.set(userId,persona);return persona;}
+    // A transient null must not erase a persona id learned from the frontend's
+    // activePersonaId setting or PERSONA_CHANGED event.
+    if(userId&&activePersonaByUser.has(userId))return activePersonaByUser.get(userId)??null;
+    return null;
   }catch{
     return userId&&activePersonaByUser.has(userId)?activePersonaByUser.get(userId)??null:null;
   }
@@ -434,13 +435,17 @@ async function activeChatId(userId?:string,hint=''):Promise<string>{
   const explicit=String(hint||'').trim();
   if(explicit){if(userId){activeChatByUser.set(userId,explicit);userByChat.set(explicit,userId);}return explicit;}
   try{
-    // getActive() is the authoritative host setting. The event cache is only a
-    // fallback for a transient lookup failure, never preferred over the host.
-    const chat=await spindle.chats.getActive();
+    // The official operator-scoped Lumiverse examples pass userId explicitly to
+    // chats.getActive(). This reads the same activeChatId setting maintained by
+    // the frontend and is the authoritative lookup for manual UI actions.
+    const chat=await spindle.chats.getActive(userId||undefined);
     const id=String(chat?.id||chat?.chat_id||'');
-    if(userId){if(id){activeChatByUser.set(userId,id);userByChat.set(id,userId);}else activeChatByUser.delete(userId);}
-    return id;
-  }catch{return userId?activeChatByUser.get(userId)||'':'';}
+    if(userId&&id){activeChatByUser.set(userId,id);userByChat.set(id,userId);}
+    if(id)return id;
+  }catch(err){spindle.log?.warn?.(`Active chat lookup failed: ${String(err)}`);}
+  // Never erase a valid event/frontend hint merely because getActive() returned
+  // null during a transient host/runtime transition.
+  return userId?activeChatByUser.get(userId)||'':'';
 }
 function mapConnections(raw:any[]):any[]{return raw.map((c:any)=>({id:String(c.id||c.connection_id||''),name:String(c.name||c.label||c.model||c.id||'Connection'),provider:String(c.provider||''),model:String(c.model||''),isDefault:Boolean(c.is_default),hasApiKey:c.has_api_key!==false})).filter(c=>c.id);}
 async function dashboardPayload(userId?:string,hint=''){
@@ -460,6 +465,15 @@ function registerChatEvents(){
   // CHAT_CHANGED means a chat entity changed; it is not an active-chat switch.
   // Refresh only when the changed chat is actually the active one.
   spindle.on('CHAT_CHANGED',async(payload:any,userId?:string)=>{const changed=String(payload?.chatId||'');const active=await activeChatId(userId,'');if(active&&(!changed||changed===active))await sendDashboard(userId,active,false);});
+  // activeChatId is a persisted host setting. Tracking SETTINGS_UPDATED gives us
+  // another authoritative source even when an extension worker starts after the
+  // original CHAT_SWITCHED event has already fired.
+  spindle.on('SETTINGS_UPDATED',async(payload:any,userId?:string)=>{
+    if(String(payload?.key||'')!=='activeChatId')return;
+    const id=String(payload?.value||'').trim();
+    if(userId){if(id){activeChatByUser.set(userId,id);userByChat.set(id,userId);}else activeChatByUser.delete(userId);}
+    await sendDashboard(userId,id,false);
+  });
   spindle.on('PERSONA_CHANGED',async(payload:any,userId?:string)=>{
     if(userId){
       const eventPersona=payload?.persona??payload?.activePersona??(payload?.id?payload:null);
@@ -476,6 +490,8 @@ function registerFrontend(){
   spindle.onFrontendMessage(async(payload:any,userId:string)=>{
     try{
       const type=String(payload?.type||''); const hint=String(payload?.chatId||'');
+      const personaHint=String(payload?.personaId||'').trim();
+      if(userId&&personaHint){const hinted=await getPersonaForUser(personaHint,userId);if(hinted)activePersonaByUser.set(userId,hinted);}
       if(type==='get_dashboard'){await sendDashboard(userId,hint);return;}
       if(type==='save_settings'){const current=await loadSettings(userId);await saveSettings(normalizeSettings({...current,...object(payload.settings)}),userId);spindle.toast?.success?.('Story Engine settings saved.');await sendDashboard(userId,hint);return;}
       const chatId=await activeChatId(userId,hint);

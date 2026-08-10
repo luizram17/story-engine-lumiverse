@@ -10,6 +10,7 @@ export function setup(ctx:Ctx){
   let progressionOptions:any=null;
   let busy='';
   let chatHint='';
+  let personaHint='';
 
   const removeStyle=ctx.dom.addStyle(`
     .se-shell{padding:12px 12px 28px;display:flex;flex-direction:column;gap:12px;color:var(--lumiverse-text);font-size:13px}
@@ -33,7 +34,41 @@ export function setup(ctx:Ctx){
   const inputAction=ctx.ui.registerInputBarAction({id:'open-story-engine',label:'Open Story Engine',iconSvg,enabled:true});
   const unsubAction=inputAction.onClick(()=>tab.activate());
 
-  function request(type:string,extra:any={}){ctx.sendToBackend({type,chatId:dashboard?.chatId||chatHint||'',...extra});}
+  async function readHostSettingId(key:string):Promise<string>{
+    try{
+      const response=await fetch(`/api/v1/settings/${encodeURIComponent(key)}`,{method:'GET',credentials:'same-origin',headers:{Accept:'application/json'}});
+      if(response.ok){
+        const data=await response.json();
+        let value:any=data?.value??data?.data?.value??data?.setting?.value??data;
+        if(typeof value==='string'){
+          const raw=value.trim();
+          try{const parsed=JSON.parse(raw);if(typeof parsed==='string')value=parsed;}catch{}
+          const id=String(value||'').trim();
+          if(id&&id!=='null'&&id!=='undefined')return id;
+        }
+      }
+    }catch{}
+    return '';
+  }
+  async function readHostActiveChatId():Promise<string>{
+    if(chatHint)return chatHint;
+    const id=await readHostSettingId('activeChatId');
+    if(id){chatHint=id;return id;}
+    return String(dashboard?.chatId||'').trim();
+  }
+  async function readHostActivePersonaId():Promise<string>{
+    if(personaHint)return personaHint;
+    const id=await readHostSettingId('activePersonaId');
+    if(id){personaHint=id;return id;}
+    return String(dashboard?.activePersona?.id||'').trim();
+  }
+  async function request(type:string,extra:any={}){
+    const supplied=String(extra?.chatId||dashboard?.chatId||chatHint||'').trim();
+    const chatId=supplied||await readHostActiveChatId();
+    const suppliedPersona=String(extra?.personaId||dashboard?.activePersona?.id||personaHint||'').trim();
+    const personaId=suppliedPersona||await readHostActivePersonaId();
+    ctx.sendToBackend({type,...extra,chatId:String(extra?.chatId||chatId||''),personaId:String(extra?.personaId||personaId||'')});
+  }
   function setBusy(value:string){busy=value;render();}
   function render(){
     const root=tab.root; root.replaceChildren();
@@ -99,14 +134,19 @@ export function setup(ctx:Ctx){
   }
 
   const unsubBackend=ctx.onBackendMessage((payload:any)=>{if(payload?.type==='dashboard'){dashboard=payload;busy='';render();}else if(payload?.type==='player_created'){busy='';}else if(payload?.type==='progression_options'){progressionOptions=payload;busy='';activeView='progression';render();}else if(payload?.type==='command_error'){busy='';render();}});
-  const unsubGen=ctx.events.on('GENERATION_ENDED',()=>setTimeout(()=>request('get_dashboard'),250));
+  const rememberChat=(payload:any)=>{const id=String(payload?.chatId||'').trim();if(id)chatHint=id;return id;};
+  const unsubGen=ctx.events.on('GENERATION_ENDED',(payload:any)=>{rememberChat(payload);setTimeout(()=>request('get_dashboard'),250);});
   const unsubChat=ctx.events.on('CHAT_SWITCHED',(payload:any)=>{chatHint=String(payload?.chatId||'');request('get_dashboard',{chatId:chatHint});});
   const unsubChatChanged=ctx.events.on('CHAT_CHANGED',(payload:any)=>{const changed=String(payload?.chatId||'');if(!chatHint||!changed||changed===chatHint)request('get_dashboard',{chatId:chatHint});});
-  const unsubPersona=ctx.events.on('PERSONA_CHANGED',()=>request('get_dashboard',{chatId:chatHint}));
+  const unsubMessageSent=ctx.events.on('MESSAGE_SENT',(payload:any)=>{if(rememberChat(payload))request('get_dashboard',{chatId:chatHint});});
+  const unsubUserRendered=ctx.events.on('USER_MESSAGE_RENDERED',(payload:any)=>{rememberChat(payload);});
+  const unsubCharacterRendered=ctx.events.on('CHARACTER_MESSAGE_RENDERED',(payload:any)=>{rememberChat(payload);});
+  const unsubSettings=ctx.events.on('SETTINGS_UPDATED',(payload:any)=>{const key=String(payload?.key||'');if(key==='activeChatId'){chatHint=String(payload?.value||'');request('get_dashboard',{chatId:chatHint});}else if(key==='activePersonaId'){personaHint=String(payload?.value||'');request('get_dashboard',{chatId:chatHint,personaId:personaHint});}});
+  const unsubPersona=ctx.events.on('PERSONA_CHANGED',(payload:any)=>{personaHint=String(payload?.persona?.id||payload?.id||'');request('get_dashboard',{chatId:chatHint,personaId:personaHint});});
   const unsubActivate=tab.onActivate(()=>request('get_dashboard'));
   request('get_dashboard');
 
-  return()=>{unsubBackend();unsubGen();unsubChat();unsubChatChanged();unsubPersona();unsubActivate();unsubAction();inputAction.destroy();widget?.destroy?.();tab.destroy();removeStyle();ctx.dom.cleanup();};
+  return()=>{unsubBackend();unsubGen();unsubChat();unsubChatChanged();unsubMessageSent();unsubUserRendered();unsubCharacterRendered();unsubSettings();unsubPersona();unsubActivate();unsubAction();inputAction.destroy();widget?.destroy?.();tab.destroy();removeStyle();ctx.dom.cleanup();};
 }
 
 function renderOverview(s:any,settings:any,p:any,busy:string){const h=s.health?.user;const pending=s.proseReview;return `

@@ -47,7 +47,7 @@ globalThis.spindle = {
   on:(name,fn)=>{events.set(name,fn);return()=>events.delete(name);},
   onFrontendMessage:(fn)=>{frontendHandler=fn;},
   sendToFrontend:(payload,userId)=>{lastFrontendPayload=payload;lastFrontendUserId=userId;},
-  chats:{getActive:async()=>{activeChatLookups++;return{id:'chat-smoke',name:'Smoke'};}},
+  chats:{getActive:async(userId)=>{activeChatLookups++;assert.equal(userId,'user-smoke','operator-scoped active chat lookup must receive userId');return{id:'chat-smoke',name:'Smoke'};}},
   connections:{list:async(userId)=>{connectionListUserId=userId;return[{id:'profile-1',name:'Assistant',provider:'openai',model:'gpt-test',is_default:true,has_api_key:true}];},get:async(id,userId)=>{if(userId)connectionListUserId=userId;return{id,name:'Assistant',provider:'openai',model:'gpt-test',is_default:id==='profile-1',has_api_key:true};}},
   personas:{
     getActive:async()=>{activePersonaLookups++;return activePersona;},
@@ -72,6 +72,7 @@ assert.equal(typeof frontendHandler,'function','backend did not register fronten
 assert.equal(typeof events.get('GENERATION_ENDED'),'function','backend did not register generation finalizer');
 assert.equal(typeof events.get('CHAT_SWITCHED'),'function','backend did not register chat switch tracking');
 assert.equal(typeof events.get('PERSONA_CHANGED'),'function','backend did not register persona-change tracking');
+assert.equal(typeof events.get('SETTINGS_UPDATED'),'function','backend did not register activeChatId settings tracking');
 await frontendHandler({type:'get_dashboard'},'user-smoke');
 assert.ok(activeChatLookups>0,'dashboard did not resolve the active chat');
 assert.equal(connectionListUserId,'user-smoke','dashboard did not list connections in user scope');
@@ -119,7 +120,7 @@ assert.equal(state.commandHistory.length,1);
 state.pending=null;chatStore.set('chat-smoke|story_engine_state_v8',JSON.stringify(state));
 
 // Manual history import reads canonical stored messages and reconstructs established relationships.
-await frontendHandler({type:'import_existing_history',chatId:'chat-smoke'},'user-smoke');
+await frontendHandler({type:'import_existing_history'},'user-smoke');
 state=JSON.parse(chatStore.get('chat-smoke|story_engine_state_v8'));
 assert.equal(state.bootstrap.status,'ready');
 assert.equal(state.bootstrap.sourceMessageCount,3);
@@ -130,7 +131,7 @@ assert.ok(state.health.npcs.Mira);
 assert.deepEqual(state.world.presentNpcs,['Mira'],'history import did not reconstruct current-scene NPC presence');
 
 // Manual character creation resolves an explicit usable connection before assistant generation.
-await frontendHandler({type:'create_player',chatId:'chat-smoke',applyMode:'state_only',input:{name:'Manual Hero',race:'Human',genre:'Fantasy',concept:'Traveler',appearance:'A road-worn traveler',backstory:'Has spent years on the road.',stats:{PHY:5,MND:5,CHA:5},desiredAbilities:'Travel',desiredSpells:'',inventory:'Rope',anchors:'Practical traveler'}},'user-smoke');
+await frontendHandler({type:'create_player',applyMode:'state_only',input:{name:'Manual Hero',race:'Human',genre:'Fantasy',concept:'Traveler',appearance:'A road-worn traveler',backstory:'Has spent years on the road.',stats:{PHY:5,MND:5,CHA:5},desiredAbilities:'Travel',desiredSpells:'',inventory:'Rope',anchors:'Practical traveler'}},'user-smoke');
 state=JSON.parse(chatStore.get('chat-smoke|story_engine_state_v8'));
 assert.equal(state.player.name,'Manual Hero');
 assert.equal(state.player.stats.PHY+state.player.stats.MND+state.player.stats.CHA,15);
@@ -153,7 +154,7 @@ assert.equal(lastFrontendPayload?.chatId,'chat-smoke','background CHAT_CHANGED i
 
 // Persona changes refresh the active persona exposed by the dashboard.
 const eventPersona={id:'persona-event',name:'Event Hero',title:'Current',description:'Selected in the Lumiverse persona picker.'};
-activePersona=eventPersona;
+activePersona=null; // Simulate a transient host getActive() miss after the frontend already emitted the selected persona.
 await events.get('PERSONA_CHANGED')({persona:eventPersona},'user-smoke');
 assert.equal(lastFrontendPayload?.activePersona?.id,'persona-event','persona-change event did not refresh the active persona');
 assert.equal(appendMessageCalls,0,'Story Engine injected a synthetic chat message during normal setup/actions');
