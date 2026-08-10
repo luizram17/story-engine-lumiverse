@@ -13,7 +13,7 @@ export function applyContinuitySemantic(state: StoryState, sem: SemanticLedger):
   for (const actor of sem.actors) {
     if (!actor.name) continue;
     const key = actor.name;
-    const clock = state.continuity.rapportClocks[key] ?? { lastInteractionAt: 0, lastMeaningfulAt: 0, cooldownUntil: 0, partnerMeaningfulUntil: 0 };
+    const clock = state.continuity.rapportClocks[key] ?? { rapport:0, lastInteractionAt: 0, lastMeaningfulAt: 0, cooldownUntil: 0, partnerMeaningfulUntil: 0 };
     const meaningful = actor.relation === 'benefited' || actor.relation === 'harmed' || actor.relation === 'opposed' || sem.actions.some(a => a.target.toLowerCase() === key.toLowerCase());
     const wasActive = clock.lastInteractionAt > 0 && now - clock.lastInteractionAt <= RAPPORT_ACTIVE_IDLE_LIMIT_MS;
     clock.lastInteractionAt = now;
@@ -80,11 +80,22 @@ export function upsertKnowledge(state: StoryState, input: any): void {
 
 export function archiveDescription(state: StoryState, input: any): void {
   const label=clean(input?.label,160); const description=clean(input?.description,700); if(!label||!description)return;
-  const kind=['npc','place','organization','object','other'].includes(String(input?.kind))?input.kind:'other';
+  const kind=['npc','place','location','organization','faction','event','object','other'].includes(String(input?.kind))?input.kind:'other';
   const key=`${kind}|${label.toLowerCase()}`;
+  const history=cleanList(input?.historyAdd??input?.history,12,400);
+  const connections=cleanList(input?.connectionsAdd??input?.connections,12,180);
+  const evidence=cleanList(input?.evidence,8,500);
   const existing=state.continuity.descriptiveArchive.find(x=>`${x.kind}|${x.label.toLowerCase()}`===key);
-  if(existing){existing.description=description;existing.lastSeenTurn=state.turn;if(input?.promotedName)existing.promotedName=clean(input.promotedName,120);return;}
-  state.continuity.descriptiveArchive.push({id:`da_${hash32(`${key}|${state.turn}`).toString(36)}`,label,kind,description,promotedName:clean(input?.promotedName,120)||undefined,firstSeenTurn:state.turn,lastSeenTurn:state.turn});
+  if(existing){
+    existing.description=description;existing.lastSeenTurn=state.turn;
+    if(input?.promotedName)existing.promotedName=clean(input.promotedName,120);
+    if(input?.affiliation)existing.affiliation=clean(input.affiliation,180);
+    if(input?.lastKnownStatus)existing.lastKnownStatus=clean(input.lastKnownStatus,220);
+    if(input?.lastKnownLocation)existing.lastKnownLocation=clean(input.lastKnownLocation,220);
+    existing.history=mergeClean(existing.history,history,12);existing.connections=mergeClean(existing.connections,connections,12);existing.evidence=mergeClean(existing.evidence,evidence,10);
+    return;
+  }
+  state.continuity.descriptiveArchive.push({id:`da_${hash32(`${key}|${state.turn}`).toString(36)}`,label,kind,description,promotedName:clean(input?.promotedName,120)||undefined,affiliation:clean(input?.affiliation,180)||undefined,history,connections,lastKnownStatus:clean(input?.lastKnownStatus,220)||undefined,lastKnownLocation:clean(input?.lastKnownLocation,220)||undefined,evidence,firstSeenTurn:state.turn,lastSeenTurn:state.turn});
 }
 
 export function consumeThreadsForActor(state: StoryState, actor: string): void {
@@ -138,5 +149,7 @@ function upsertWorldArc(state: StoryState, actor: string, goal: string, magnitud
   if(!arc){arc={id:`arc_${hash32(`${actor}|${goal}|${state.turn}`).toString(36)}`,actor,goal,stage:1,pressure:magnitude,lastAdvancedTurn:state.turn,status:'active'};state.continuity.worldArcs.push(arc);return;}
   arc.goal=goal;arc.stage=Math.min(5,arc.stage+1);arc.pressure=Math.min(5,Math.max(arc.pressure,magnitude));arc.lastAdvancedTurn=state.turn;
 }
+function cleanList(value:any,limit:number,max:number):string[]{const source=Array.isArray(value)?value:[];const out:string[]=[];const seen=new Set<string>();for(const raw of source){const v=clean(raw,max);const k=v.toLowerCase();if(v&&!seen.has(k)){seen.add(k);out.push(v);}}return out.slice(-limit);}
+function mergeClean(a:string[]|undefined,b:string[],limit:number):string[]{return cleanList([...(a||[]),...b],limit,500);}
 function normalizeKind(v:string){return String(v||'').trim().toLowerCase().replace(/[\s-]+/g,'_');}
 function clean(v:any,max:number){return String(v??'').replace(/\s+/g,' ').trim().slice(0,max);}

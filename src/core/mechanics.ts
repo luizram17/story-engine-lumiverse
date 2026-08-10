@@ -1,9 +1,9 @@
 import type { AggressionResult, ProactivityResult, RandomEventResult, RollResult, SemanticAction, SemanticLedger, StoryState, TurnResolution, OutcomeTier } from '../shared/types.js';
 import { DAMAGE_BY_OUTCOME, MAX_ACTIONS } from './config.js';
 import { TurnRng } from './rng.js';
-import { conditionFromActor, impairmentForCondition, healingForOutcome, safeSceneHealing } from './health.js';
+import { conditionFromActor, impairmentForCondition, healingForOutcome, safeSceneHealing, healingDcForActor } from './health.js';
 import { ensureNpc, rankFromCapabilityPool } from './state.js';
-import { standingInfluence } from './relationships.js';
+import { relationshipLeverage } from './relationships.js';
 import { resolveRandomEvent } from './world.js';
 import { generateUniqueNames } from './names.js';
 import { deterministicLoot, resolvePlayerEquipmentDefense } from './economy.js';
@@ -37,7 +37,7 @@ export function resolveTurn(state:StoryState, semantic:SemanticLedger, fingerpri
   for(const actor of semantic.actors){
     if(!actor.name)continue;
     const rank=rankFromCapabilityPool(actor.capabilityPool,seed,actor.name,actor.rank);
-    const npc=ensureNpc(state,actor.name,rank,actor.role,seed,actor.mainStat); npc.companion=npc.companion||actor.companion; npc.powerActor=npc.powerActor||actor.powerActor;
+    const npc=ensureNpc(state,actor.name,rank,actor.role,seed,actor.mainStat); npc.companion=npc.companion||actor.companion; npc.powerActor=npc.powerActor||actor.powerActor; if(actor.romanceStyle)npc.romanceStyle=actor.romanceStyle;if(actor.standingInfluence){npc.standingInfluence=actor.standingInfluence;npc.standingBasis=actor.standingInfluence==='none'?undefined:(actor.standingBasis||npc.standingBasis);}
   }
   if(semantic.claimCheck?.present){
     const c=semantic.claimCheck;
@@ -56,7 +56,7 @@ export function resolveTurn(state:StoryState, semantic:SemanticLedger, fingerpri
     if(!availability.ok){ refereeNotes.push(availability.note); continue; }
     if(action.kind==='heal' && !action.rollNeeded){
       const amount=safeSceneHealing(action.healingMagic);
-      healthEvents.push({targetType:action.target?'npc':'user',target:action.target,kind:'heal',amount});
+      healthEvents.push({targetType:action.target?'npc':'user',target:action.target,kind:'heal',amount,naturalTreatment:!action.healingMagic});
       refereeNotes.push(`Safe-scene ${action.healingMagic?'magical':'natural'} aid heals ${amount}.`);
       continue;
     }
@@ -103,7 +103,11 @@ function resolveAction(state:StoryState,action:SemanticAction,index:number,rng:T
   const userTotal=userDie+playerStat+impairment;
   let oppositionStat=0;
   let oppositionDie=rng.d20();
-  if(action.target && action.challengeType!=='environment'){
+  if(action.kind==='heal'){
+    const targetHealth=action.target?state.health.npcs[action.target]:state.health.user;
+    const dc=targetHealth?healingDcForActor(targetHealth):13;
+    oppositionStat=dc-10;oppositionDie=10;
+  } else if(action.target && action.challengeType!=='environment'){
     const actor=state.npcs[action.target] ?? ensureNpc(state,action.target,'Average','NPC',seed);
     const targetStat=action.targetStat && action.targetStat!=='NONE' ? action.targetStat : chooseOppositionStat(action);
     oppositionStat=actor.stats[targetStat];
@@ -122,7 +126,7 @@ function resolveAction(state:StoryState,action:SemanticAction,index:number,rng:T
 function buildHealthEvents(action:SemanticAction, result:RollResult, events:TurnResolution['healthEvents']):void {
   if(action.kind==='heal'){
     const amt=healingForOutcome(result.outcomeTier,action.healingMagic);
-    if(amt>0) events.push({targetType:action.target ? 'npc':'user',target:action.target,kind:'heal',amount:amt});
+    if(amt>0) events.push({targetType:action.target ? 'npc':'user',target:action.target,kind:'heal',amount:amt,naturalTreatment:!action.healingMagic});
     return;
   }
   if(!action.harmful || !['mundane_combat','supernatural_combat'].includes(action.challengeType)) return;
@@ -137,7 +141,7 @@ export function resolveProactivity(state:StoryState,sem:SemanticLedger,rolls:Rol
   const candidates:ProactivityResult[]=[];
   for(const actor of sem.actors){
     const npc=state.npcs[actor.name]; if(!npc || npc.status!=='active') continue;
-    const relation=standingInfluence(state,actor.name);
+    const relation=relationshipLeverage(state,actor.name);
     const opposed=actor.relation==='opposed'||actor.relation==='harmed';
     const crisis=sem.scene.danger==='crisis';
     const forced=opposed && rolls.some(r=>r.target===actor.name && r.counterPotential!=='none');
@@ -147,7 +151,7 @@ export function resolveProactivity(state:StoryState,sem:SemanticLedger,rolls:Rol
     const proactive=forced||die>=threshold;
     let intent='NONE'; let target='';
     if(proactive){
-      if(opposed || npc.hostility>=3) { intent=crisis||forced?'ESCALATE_VIOLENCE':'THREAT_OR_POSTURE'; target='{{user}}'; }
+      if(opposed || npc.hostility>=3) { intent=crisis||forced||npc.hostility>=4?'ESCALATE_VIOLENCE':'THREAT_OR_POSTURE'; target='{{user}}'; }
       else if(npc.companion && crisis){
         if(npc.hostility>=2 || npc.fear>=3 || (npc.bond<=1 && rng.chance(.2))) intent='Companion_Abandon';
         else if(npc.bond>=3 && rng.chance(.5)) intent='Companion_Protect';
@@ -155,9 +159,21 @@ export function resolveProactivity(state:StoryState,sem:SemanticLedger,rolls:Rol
         target='{{user}}';
       }
       else if(npc.romanceStage==='partner' && npc.bond>=3){ const clock=state.continuity.rapportClocks[npc.name]; intent=clock&&Date.now()<clock.partnerMeaningfulUntil?'PLAN_OR_BANTER':rng.chance(.35)?'Partner_Protect':'Partner_Affection';target='{{user}}'; }
-      else if(npc.romanceStage==='interest' || npc.romanceStage==='dating'){ intent=rng.chance(.4)?'Romantic_Flirt':'Thoughtful_Gift';target='{{user}}'; }
+      else if(npc.romanceStage==='interest' || npc.romanceStage==='dating'){
+        intent=npc.romanceStyle==='nervous'?'Romantic_Hesitant_Initiative':npc.romanceStyle==='flirt'?'Romantic_Flirt':rng.chance(.4)?'Romantic_Flirt':'Thoughtful_Gift';
+        target='{{user}}';
+      }
       else if(npc.bond>=3){ intent=rng.chance(.25)?'Thoughtful_Gift':'SUPPORT_ACT'; target='{{user}}'; }
       else { intent='PLAN_OR_BANTER'; target='{{user}}'; }
+
+      // Recognized authority/status can constrain an unsolicited attack's outward expression,
+      // but never cancels self-defense, retaliation, counters, active combat, or boundary response.
+      if(intent==='ESCALATE_VIOLENCE' && target==='{{user}}' && npc.standingInfluence==='constrained' && !forced){
+        const harmfulUserAction=sem.actions.some(a=>a.harmful && a.target && sameName(a.target,npc.name));
+        const boundaryResponse=(sem.restraintControl?.present&&sameName(sem.restraintControl.target,npc.name))||(sem.boundaryPressure?.present&&sameName(sem.boundaryPressure.target,npc.name))||(sem.boundaryBreak?.present&&sameName(sem.boundaryBreak.target,npc.name));
+        const establishedCombat=sem.activeHostileThreat===true || sem.scene.danger==='crisis' || opposed || harmfulUserAction || boundaryResponse;
+        if(!establishedCombat){intent='THREAT_OR_POSTURE';target='{{user}}';}
+      }
     }
     candidates.push({npc:actor.name,proactive,tier,die,threshold,intent,target});
   }
@@ -211,3 +227,5 @@ function calculateXp(rolls:RollResult[]):number{
 function chooseUserStat(a:SemanticAction){ if(a.challengeType==='social') return 'CHA' as const; if(a.challengeType==='supernatural_combat') return 'MND' as const; return 'PHY' as const; }
 function chooseOppositionStat(a:SemanticAction){ if(a.challengeType==='social') return 'CHA' as const; if(a.challengeType==='supernatural_combat') return 'MND' as const; return 'PHY' as const; }
 function difficultyBonus(d:number){ return ({1:0,2:0,3:4,4:8,5:12} as Record<number,number>)[d]??4; }
+
+function sameName(a:string,b:string){return String(a||'').trim().toLowerCase()===String(b||'').trim().toLowerCase();}

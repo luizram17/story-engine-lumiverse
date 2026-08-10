@@ -15,13 +15,16 @@ const weatherFlow: Record<Weather, Weather[]> = {
 
 export function applyWorldSemantic(state: StoryState, sem: SemanticLedger, seed: string): string[] {
   const notes: string[] = [];
+  if (sem.scene.reputationLocation) state.world.reputationLocation=sem.scene.reputationLocation;
   if (sem.scene.location && sem.scene.location !== state.world.location) {
-    state.world.location = sem.scene.location; notes.push(`Location: ${sem.scene.location}`);
+    state.world.location = sem.scene.location; state.world.positionEstablished=true; notes.push(`Location: ${sem.scene.location}`);
+    if(!state.world.reputationLocation)state.world.reputationLocation=sem.scene.location;
   }
-  if (sem.scene.area) state.world.area = sem.scene.area;
-  if (typeof sem.scene.indoors === 'boolean') state.world.indoors = sem.scene.indoors;
+  if (sem.scene.area) {state.world.area = sem.scene.area;state.world.positionEstablished=true;}
+  if (typeof sem.scene.indoors === 'boolean') {state.world.indoors = sem.scene.indoors;state.world.positionEstablished=true;}
   if (sem.scene.timeAdvance) advanceTime(state, sem.scene.timeAdvance, seed);
-  if (sem.scene.weather) state.world.weather = sem.scene.weather;
+  if (sem.scene.timeOfDay) {state.world.time=sem.scene.timeOfDay;state.world.timeEstablished=true;}
+  if (sem.scene.weather) {state.world.weather = sem.scene.weather;state.world.weatherEstablished=true;state.world.weatherRemainingSlots=Math.max(1,state.world.weatherRemainingSlots||2);}
   if (Array.isArray(sem.scene.presentNpcs)) {
     state.world.presentNpcs = [...new Set(sem.scene.presentNpcs.map(x=>String(x||'').trim()).filter(Boolean))].slice(0,40);
     for (const name of state.world.presentNpcs) { const npc=state.npcs[name]; if(npc){npc.lastSeenTurn=state.turn;if(npc.status==='inactive')npc.status='active';} }
@@ -33,15 +36,20 @@ export function applyWorldSemantic(state: StoryState, sem: SemanticLedger, seed:
 
 export function advanceTime(state: StoryState, slots: number, seed: string): void {
   const n = Math.max(0, Math.min(12, Math.floor(slots)));
+  if(n>0)state.world.timeEstablished=true;
   for (let i=0;i<n;i++) {
     const idx = timeOrder.indexOf(state.world.time);
     const next = (idx + 1) % timeOrder.length;
-    if (next === 0) {
-      state.world.dayIndex += 1;
-      const rng = new TurnRng(`${seed}|weather|day:${state.world.dayIndex}`);
-      state.world.weather = rng.pick(weatherFlow[state.world.weather]);
-    }
+    if (next === 0) state.world.dayIndex += 1;
     state.world.time = timeOrder[next]!;
+    if(state.world.weatherEstablished){
+      state.world.weatherRemainingSlots=Math.max(0,(state.world.weatherRemainingSlots||0)-1);
+      if(state.world.weatherRemainingSlots<=0){
+        const rng = new TurnRng(`${seed}|weather|day:${state.world.dayIndex}|time:${state.world.time}|${i}`);
+        state.world.weather = rng.pick(weatherFlow[state.world.weather]);
+        state.world.weatherRemainingSlots=rng.int(1,3);
+      }
+    }
   }
 }
 
@@ -81,7 +89,7 @@ export function applyPowerActorSignals(state: StoryState, sem: SemanticLedger): 
     if (signal.signal === 'grievance' || signal.signal === 'threat') npc.hostility = Math.min(4, npc.hostility + (signal.magnitude >= 3 ? 1 : 0));
     if (signal.signal === 'favor') npc.bond = Math.min(4, npc.bond + (signal.magnitude >= 3 ? 1 : 0));
     const due = state.turn + Math.max(1, 5 - signal.magnitude);
-    state.world.plans.push({ id:`plan_${hash32(`${signal.actor}|${signal.signal}|${state.turn}`).toString(36)}`, actor:signal.actor, intent:planIntent(signal.signal), dueTurn:due, status:'pending' });
+    state.world.plans.push({ id:`plan_${hash32(`${signal.actor}|${signal.signal}|${state.turn}`).toString(36)}`, actor:signal.actor, intent:planIntent(signal.signal), kind:'power_actor', cause:`${signal.signal} registered from scene consequences`, consequences:[], evidence:[], createdTurn:state.turn, updatedTurn:state.turn, dueTurn:due, status:'pending' });
     notes.push(`${signal.actor} registered ${signal.signal}; strategic consequence due ~turn ${due}.`);
   }
   state.world.plans = state.world.plans.slice(-80);
@@ -92,15 +100,35 @@ export function activateDuePlans(state: StoryState): void {
   for (const p of state.world.plans) if (p.status === 'pending' && p.dueTurn <= state.turn) p.status = 'due';
 }
 
-export function worldSummary(state: StoryState): string {
-  const due = state.world.plans.filter(p=>p.status==='due').slice(0,5).map(p=>`${p.actor}: ${p.intent}`);
+export function worldSummary(state: StoryState, sem?:SemanticLedger): string {
+  const due = state.world.plans.filter(p=>p.status==='due').slice(0,5).map(p=>`${p.actor}: ${p.intent}${p.consequences?.length?` [possible consequences: ${p.consequences.slice(0,3).join('; ')}]`:''}`);
   const facts = [...state.world.facts].sort((a,b)=>b.salience-a.salience || b.lastConfirmedTurn-a.lastConfirmedTurn).slice(0,10).map(f=>f.fact);
+  const observable=observablePlanEvidence(state,sem).slice(0,2).map(x=>`${x.topic}: ${x.text} [evidence ${x.id}]`);
   return [
-    `Scene: ${state.world.location || '(unknown)'}${state.world.area ? ` / ${state.world.area}` : ''}; day ${state.world.dayIndex}, ${state.world.time}; weather ${state.world.weather}; ${state.world.indoors?'indoors':'outdoors'}.`,
-    state.world.presentNpcs.length ? `NPCs physically present: ${state.world.presentNpcs.join(', ')}.` : 'NPCs physically present: none established.',
-    facts.length ? `Established facts: ${facts.join(' | ')}` : '',
-    due.length ? `Due off-screen plans: ${due.join(' | ')}` : '',
+    `Scene: ${state.world.positionEstablished?(state.world.location || '(unnamed place)'):'(position unknown)'}${state.world.area ? ` / ${state.world.area}` : ''}; ${state.world.timeEstablished?`day ${state.world.dayIndex}, ${state.world.time}`:'time unknown'}; ${state.world.weatherEstablished?`weather ${state.world.weather}`:'weather unknown'}; ${state.world.positionEstablished?(state.world.indoors?'indoors':'outdoors'):'position type unknown'}.`,
+    state.world.presentNpcs.length?`Physically present NPCs: ${state.world.presentNpcs.join(', ')}.`:'Physically present NPCs: none established.',
+    facts.length ? `World memory: ${facts.join(' | ')}` : '',
+    due.length ? `Due world developments: ${due.join(' | ')}` : '',
+    observable.length ? `Observable leads/evidence that may surface naturally if the scene supports it: ${observable.join(' | ')}` : '',
   ].filter(Boolean).join('\n');
+}
+
+export function observablePlanEvidence(state:StoryState,sem?:SemanticLedger){
+  const present=new Set(state.world.presentNpcs.map(x=>x.toLowerCase()));
+  const investigating=Boolean(sem?.actions?.some(a=>a.kind==='loot'||a.challengeType==='stealth'||a.kind==='environment'));
+  const result:Array<{planId:string;id:string;topic:string;text:string;route:string}>=[];
+  for(const plan of state.world.plans.filter(p=>p.status==='due'||p.status==='pending')){
+    for(const evidence of plan.evidence||[]){
+      if(evidence.discovered)continue;
+      const open=evidence.route==='location'?Boolean(evidence.location&&state.world.location&&evidence.location.toLowerCase()===state.world.location.toLowerCase())
+        :evidence.route==='actor'?Boolean(evidence.actor&&present.has(evidence.actor.toLowerCase()))
+        :evidence.route==='investigation'?investigating
+        :Boolean(state.world.location);
+      if(open)result.push({planId:plan.id,id:evidence.id,topic:evidence.topic,text:evidence.text,route:evidence.route});
+      if(result.length>=4)return result;
+    }
+  }
+  return result;
 }
 
 function planIntent(signal:string){ return ({notice:'observe and assess',favor:'consider repayment or aid',grievance:'prepare retaliation, leverage, or an indirect agent',threat:'counter or contain the threat, including intermediaries or covert agents when appropriate',opportunity:'pursue the opening directly or through agents'} as any)[signal] || 'act on new information'; }

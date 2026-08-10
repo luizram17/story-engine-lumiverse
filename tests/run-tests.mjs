@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
-import { combatOutcome, nonHostileOutcome, resolveTurn } from '../dist/core/mechanics.js';
+import { combatOutcome, nonHostileOutcome, resolveTurn, resolveProactivity } from '../dist/core/mechanics.js';
 import { createDefaultState, normalizeState, ensureNpc, rankFromCapabilityPool, makeCoreSnapshot, restoreCoreSnapshot } from '../dist/core/state.js';
-import { conditionFromActor, applyDamage, applyHeal, safeSceneHealing } from '../dist/core/health.js';
+import { conditionFromActor, applyDamage, applyHeal, safeSceneHealing, healingDcForCondition } from '../dist/core/health.js';
 import { deterministicLoot, addCurrency, resolvePlayerEquipmentDefense } from '../dist/core/economy.js';
-import { collectProseFindings } from '../dist/core/prose.js';
+import { applyProseRepairPayload, buildProseRepairCases, collectProseFindings } from '../dist/core/prose.js';
 import { generateUniqueNames } from '../dist/core/names.js';
 import { normalizeSemanticLedger } from '../dist/core/semantic.js';
 import { applyContinuitySemantic, boundaryGate, upsertKnowledge } from '../dist/core/continuity.js';
 import { extractOocCommands, stripOocCommands, normalizeMutationBatch, applyMutationBatch } from '../dist/core/commands.js';
-import { validateCharacterInput } from '../dist/core/character.js';
+import { validateCharacterInput, normalizeCharacterSheet, normalizeConvertedPersonaSheet, characterTool } from '../dist/core/character.js';
 import { updateRelationships } from '../dist/core/relationships.js';
-import { applyWorldSemantic } from '../dist/core/world.js';
+import { applyWorldSemantic, observablePlanEvidence } from '../dist/core/world.js';
 
 assert.equal(combatOutcome(8,3).outcomeTier,'Critical_Success');
 assert.equal(combatOutcome(5,3).landedActions,2);
@@ -38,10 +38,31 @@ assert.deepEqual(presenceState.world.presentNpcs,['Gate Guard']);
 const legacyPresence=normalizeState({...createDefaultState(),version:7,turn:3,world:{...createDefaultState().world,presentNpcs:undefined},npcs:{Mira:{...presentNpc,lastSeenTurn:3,status:'active'}}});
 assert.deepEqual(legacyPresence.world.presentNpcs,['Mira'],'v7 migration should conservatively recover NPCs seen on the current turn');
 
+assert.equal(createDefaultState().world.positionEstablished,false);
+assert.equal(createDefaultState().world.timeEstablished,false);
+assert.equal(createDefaultState().world.weatherEstablished,false);
+const establishedWorld=createDefaultState();
+const establishedWorldSem=normalizeSemanticLedger({summary:'arrive at the market at dusk in rain',actions:[],actors:[],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{reputationLocation:'Emberfall',location:'Market Square',area:'North Arcade',indoors:false,timeOfDay:'evening',weather:'light_rain',presentNpcs:[],publicWitnesses:true,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+applyWorldSemantic(establishedWorld,establishedWorldSem,'world-establish');
+assert.equal(establishedWorld.world.reputationLocation,'Emberfall');assert.equal(establishedWorld.world.positionEstablished,true);assert.equal(establishedWorld.world.timeEstablished,true);assert.equal(establishedWorld.world.weatherEstablished,true);assert.equal(establishedWorld.world.time,'evening');
+
+// Rich world memory keeps routed evidence private until the relevant route is open.
+const routedWorld=createDefaultState();routedWorld.world.location='Old Harbor';routedWorld.world.presentNpcs=['Mira'];routedWorld.world.plans.push({id:'plan-test',actor:'Guild',intent:'recover the stolen ledger',kind:'faction',cause:'The ledger was stolen.',consequences:['send an investigator'],evidence:[{id:'ev-location',topic:'boot prints',text:'Fresh boot prints lead toward the warehouse.',route:'location',location:'Old Harbor',discovered:false},{id:'ev-actor',topic:'Mira knows',text:'Mira has seen the guild seal.',route:'actor',actor:'Mira',discovered:false}],createdTurn:0,updatedTurn:0,dueTurn:1,status:'due'});
+const openEvidence=observablePlanEvidence(routedWorld);assert.equal(openEvidence.length,2);
+const migratedWorld=normalizeState({...routedWorld,version:9,continuity:{...routedWorld.continuity,descriptiveArchive:[{id:'archive-1',label:'Guild Hall',kind:'location',description:'A fortified counting house.',history:['Raided last winter'],connections:['Merchants'],evidence:['The guild crest hangs above the door.'],firstSeenTurn:1,lastSeenTurn:2}]}});assert.equal(migratedWorld.version,10);assert.equal(migratedWorld.continuity.descriptiveArchive[0]?.history[0],'Raided last winter');assert.equal(migratedWorld.world.plans[0]?.evidence?.[0]?.route,'location');
+
 
 // Starting character point-buy is exactly 15, with 1-9 per stat.
 assert.deepEqual(validateCharacterInput({name:'Balanced',race:'Human',genre:'Fantasy',concept:'',appearance:'',backstory:'',stats:{PHY:5,MND:5,CHA:5}}),[]);
 assert.ok(validateCharacterInput({name:'Too strong',race:'Human',genre:'Fantasy',concept:'',appearance:'',backstory:'',stats:{PHY:8,MND:8,CHA:8}}).some(x=>x.includes('15')));
+
+// New-character identity/stat choices are locked to the user's 15-point form; the assistant cannot silently rewrite them.
+const lockedSheet=normalizeCharacterSheet({name:'Wrong Name',race:'Elf',genre:'Cyberpunk',appearance:'Generated',stats:{PHY:9,MND:9,CHA:9},naturalWeapons:[],abilities:['Roadcraft — finds practical routes'],spells:['Illegal spell'],inventory:[],currency:[],gear:[],anchors:[],concept:'',backstory:''},{name:'Chosen Name',race:'Human',genre:'Fantasy',concept:'Traveler',appearance:'',backstory:'',stats:{PHY:6,MND:5,CHA:4}},'new');
+assert.equal(lockedSheet.name,'Chosen Name');assert.equal(lockedSheet.race,'Human');assert.equal(lockedSheet.genre,'Fantasy');assert.deepEqual(lockedSheet.stats,{PHY:6,MND:5,CHA:4});assert.deepEqual(lockedSheet.spells,[]);
+assert.deepEqual(lockedSheet.anchors,[],'new-character assistant must not invent continuity anchors when the user supplied none');
+assert.equal(characterTool('new',{PHY:4,MND:7,CHA:4}).parameters.properties.spells.minItems,1);
+const convertedSheet=normalizeConvertedPersonaSheet({name:'Veteran',race:'Human',genre:'Fantasy',appearance:'',stats:{PHY:6,MND:5,CHA:4},naturalWeapons:[],abilities:['A','B','C'],spells:['S1','S2'],inventory:[],currency:[],gear:[],anchors:[],concept:'',backstory:''},{name:'Veteran',description:''});
+assert.deepEqual(convertedSheet.abilities,['A','B','C']);assert.deepEqual(convertedSheet.spells,['S1','S2']);
 
 // OOC extraction is isolated from IC text and structured mutations can retcon story data.
 assert.deepEqual(extractOocCommands('I nod. ((Mira is my best friend)) Then I leave. ((Add a sword to my inventory))'),['Mira is my best friend','Add a sword to my inventory']);
@@ -65,6 +86,52 @@ assert.equal(hostileState.npcs.Varek.disposition,'hatred');
 assert.ok(hostileState.npcs.Varek.relationshipDescriptors.includes('sworn enemy'));
 assert.equal(establishedState.npcs.Lena.companion,true);assert.match(establishedState.npcs.Lena.notes.join(' '),/Best friends since childhood/);
 
+// Upstream parity: B3 -> B4 is slow and requires rapport 5 plus two distinct positive evidence categories.
+const slowBondState=createDefaultState();
+slowBondState.turn=1;
+const slowNpc=ensureNpc(slowBondState,'Sera','Average','friend','slow-bond');slowNpc.bond=3;slowNpc.fear=1;slowNpc.hostility=1;
+slowBondState.continuity.rapportClocks.Sera={rapport:5,lastInteractionAt:0,lastMeaningfulAt:0,cooldownUntil:Date.now()+999999,partnerMeaningfulUntil:0};
+const oneEvidence=normalizeSemanticLedger({summary:'ordinary cooperation',actions:[],actors:[{name:'Sera',role:'friend',rank:'Average',relation:'benefited',powerActor:false,companion:false,slowBondEvidence:{cooperation:true}}],benefitedObservers:['Sera'],npcAwareOfUser:['Sera'],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:false,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+updateRelationships(slowBondState,oneEvidence,[],'slow-1');
+assert.equal(slowNpc.bond,3,'one slow-bond evidence category must not promote B3 to B4');
+slowBondState.turn=2;
+const twoEvidence=normalizeSemanticLedger({summary:'teamwork under pressure',actions:[],actors:[{name:'Sera',role:'friend',rank:'Average',relation:'benefited',powerActor:false,companion:false,slowBondEvidence:{teamwork:true}}],benefitedObservers:['Sera'],npcAwareOfUser:['Sera'],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:false,danger:'active'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+updateRelationships(slowBondState,twoEvidence,[],'slow-2');
+assert.equal(slowNpc.bond,4,'two distinct slow-bond categories at rapport 5 should allow B4');
+
+const blockedSlowState=createDefaultState();blockedSlowState.turn=1;
+const blockedSlowNpc=ensureNpc(blockedSlowState,'Iris','Average','friend','slow-block');blockedSlowNpc.bond=3;blockedSlowNpc.fear=1;blockedSlowNpc.hostility=1;
+blockedSlowState.continuity.rapportClocks.Iris={rapport:5,lastInteractionAt:0,lastMeaningfulAt:0,cooldownUntil:Date.now()+999999,partnerMeaningfulUntil:0};
+const blockedEvidence=normalizeSemanticLedger({summary:'mixed closeness',actions:[],actors:[{name:'Iris',role:'friend',rank:'Average',relation:'benefited',powerActor:false,companion:false,slowBondEvidence:{cooperation:true,personalAttention:true},slowBondBlockers:['unresolved coercion']}],benefitedObservers:['Iris'],npcAwareOfUser:['Iris'],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:false,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+updateRelationships(blockedSlowState,blockedEvidence,[],'slow-blocked');
+assert.equal(blockedSlowNpc.bond,3,'slow-bond blockers must prevent B4 promotion');
+
+// Earlier Bond tiers are rapport-gated and negative interaction reduces rapport.
+const rapportState=createDefaultState();rapportState.turn=3;const rapportNpc=ensureNpc(rapportState,'Tala','Average','acquaintance','rapport');rapportNpc.bond=2;rapportNpc.fear=0;rapportNpc.hostility=0;rapportState.continuity.rapportClocks.Tala={rapport:2,lastInteractionAt:0,lastMeaningfulAt:0,cooldownUntil:Date.now()+999999,partnerMeaningfulUntil:0};
+const rapportBenefit=normalizeSemanticLedger({summary:'help',actions:[],actors:[{name:'Tala',role:'acquaintance',rank:'Average',relation:'benefited',powerActor:false,companion:false}],benefitedObservers:['Tala'],npcAwareOfUser:['Tala'],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:false,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+updateRelationships(rapportState,rapportBenefit,[],'rapport-benefit');assert.equal(rapportNpc.bond,2,'B2 must wait for rapport 3');
+rapportState.continuity.rapportClocks.Tala.rapport=3;updateRelationships(rapportState,rapportBenefit,[],'rapport-benefit-2');assert.equal(rapportNpc.bond,3,'B2 may advance at rapport 3');
+const rapportNegative=normalizeSemanticLedger({summary:'threat',actions:[],actors:[{name:'Tala',role:'acquaintance',rank:'Average',relation:'opposed',powerActor:false,companion:false}],npcAwareOfUser:['Tala'],explicitIntimidationOrCoercion:true,intimacyAdvanceExplicit:false,scene:{publicWitnesses:false,danger:'active'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+updateRelationships(rapportState,rapportNegative,[],'rapport-negative');assert.equal(rapportState.continuity.rapportClocks.Tala.rapport,2,'negative pressure should reduce rapport by one');
+
+// Recognized standing constrains only unsolicited outward escalation; it does not rewrite B/F/H.
+const standingState=createDefaultState();
+const standingNpc=ensureNpc(standingState,'Captain','Trained','officer','standing');standingNpc.hostility=4;standingNpc.bond=1;standingNpc.fear=1;standingNpc.standingInfluence='constrained';standingNpc.standingBasis='recognizes the player as the commanding noble';
+const standingSem=normalizeSemanticLedger({summary:'tense silence',actions:[],actors:[{name:'Captain',role:'officer',rank:'Trained',relation:'neutral',powerActor:false,companion:false,standingInfluence:'constrained',standingBasis:'recognized noble authority'}],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:true,danger:'calm'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
+const fixedRng={d20:()=>20,chance:()=>false};
+const standingPro=resolveProactivity(standingState,standingSem,[],fixedRng);
+assert.equal(standingPro[0]?.intent,'THREAT_OR_POSTURE');
+assert.equal(standingNpc.hostility,4,'standing must never alter relationship scores');
+standingNpc.standingInfluence='none';
+const freePro=resolveProactivity(standingState,standingSem,[],fixedRng);
+assert.equal(freePro[0]?.intent,'ESCALATE_VIOLENCE');
+
+// Durable tracker surfaces survive normalization/migration.
+const durable=normalizeState({...createDefaultState(),version:8,player:{name:'Durable',race:'Human',genre:'Fantasy',appearance:'',stats:{PHY:5,MND:5,CHA:5},naturalWeapons:[],abilities:[],spells:[],inventory:['Key'],currency:[],gear:[],anchors:[],wounds:['scarred palm'],conditions:['cursed'],tasks:['Find the apothecary'],commitments:['Repay Mira']},npcs:{Mira:{...ensureNpc(createDefaultState(),'Mira','Average','ally','durable'),inventory:['Letter'],wounds:['sprained wrist'],conditions:['wanted'],aliases:['The Courier'],romanceStyle:'nervous',standingInfluence:'aware',standingBasis:'recognizes guild rank'}}});
+assert.deepEqual(durable.player?.tasks,['Find the apothecary']);
+assert.deepEqual(durable.npcs.Mira.inventory,['Letter']);
+assert.equal(durable.npcs.Mira.romanceStyle,'nervous');
+
 assert.equal(conditionFromActor({maxHp:100,currentHp:100,dead:false,nonlethalDefeat:false}),'healthy');
 assert.equal(conditionFromActor({maxHp:100,currentHp:76,dead:false,nonlethalDefeat:false}),'bruised');
 assert.equal(conditionFromActor({maxHp:100,currentHp:75,dead:false,nonlethalDefeat:false}),'wounded');
@@ -78,6 +145,9 @@ applyDamage(actor,4); assert.equal(conditionFromActor(actor),'badly_wounded');
 applyHeal(actor,7); assert.equal(conditionFromActor(actor),'healthy');
 applyDamage(actor,999,true); assert.equal(conditionFromActor(actor),'incapacitated');
 assert.equal(safeSceneHealing(false),3); assert.equal(safeSceneHealing(true),9);
+assert.equal(healingDcForCondition('healthy'),13);assert.equal(healingDcForCondition('wounded'),16);assert.equal(healingDcForCondition('critical'),19);
+const treated={maxHp:10,currentHp:10,dead:false,nonlethalDefeat:false};applyDamage(treated,3);assert.equal(applyHeal(treated,3,true),true);const afterTreatment=treated.currentHp;assert.equal(applyHeal(treated,3,true),false,'natural treatment must not repeat on the same damage state');assert.equal(treated.currentHp,afterTreatment);applyDamage(treated,3);assert.equal(applyHeal(treated,3,true),true,'new damage state permits a new natural treatment');
+const companionFloor=normalizeState({...createDefaultState(),npcs:{Pip:{name:'Pip',role:'companion',rank:'Weak',stats:{PHY:1,MND:1,CHA:1},bond:2,fear:0,hostility:0,disposition:'friendly',status:'active',companion:true,powerActor:false,romanceStage:'none',intimacy:0,boundary:null,notes:[],aliases:[],gear:[],inventory:[],currency:[],wounds:[],conditions:[],introducedTurn:0,lastSeenTurn:0,lootSearchCompleted:false,relationshipDescriptors:[],romanceStyle:'auto',standingInfluence:'none',slowBondEvidence:{counts:{respectfulContact:0,cooperation:0,comfortInProximity:0,boundaryRespect:0,sharedRoutine:0,playfulness:0,teamwork:0,personalAttention:0},blockers:[],lastUpdatedTurn:0}}},health:{user:{maxHp:10,currentHp:10,dead:false,nonlethalDefeat:false},npcs:{Pip:{maxHp:5,currentHp:5,dead:false,nonlethalDefeat:false}}}});assert.equal(companionFloor.health.npcs.Pip.maxHp,10);assert.equal(companionFloor.health.npcs.Pip.currentHp,10);
 
 const state=createDefaultState();
 state.player={name:'Test',race:'Human',genre:'Fantasy',appearance:'',stats:{PHY:8,MND:8,CHA:8},naturalWeapons:[],abilities:['Battle Focus'],spells:['Mend'],inventory:['rope'],currency:[],gear:['steel breastplate'],anchors:[]};
@@ -132,6 +202,13 @@ assert.equal(corpseLootAgain.lootResult?.status,'already_searched');
 
 const findings=collectProseFindings('For a moment, the air seemed to thicken. His eyes darkened.');
 assert.ok(findings.length>=2);
+const proseSource='For a moment, the air seemed to thicken. Mira says, "Stay here." The door closes.';
+const proseFindings=collectProseFindings(proseSource);
+const proseCases=buildProseRepairCases(proseSource,proseFindings);
+assert.ok(proseCases.length>=1);
+const proseFixed=applyProseRepairPayload(proseSource,proseCases,{repairs:[{caseId:proseCases[0].id,replacementSentence:'The room grows tense.'}]});
+assert.equal(proseFixed.text,'The room grows tense. Mira says, "Stay here." The door closes.','Prose Guard must preserve unaffected narration verbatim');
+
 
 const sem=normalizeSemanticLedger({summary:'attack',actions:[{label:'slash',kind:'attack',target:'Guard',challengeType:'mundane_combat',rollNeeded:true,stat:'PHY',difficulty:3,actionLength:3,harmful:true,harmMode:'nonlethal',supernatural:false,healingMagic:false}],actors:[{name:'Guard',role:'guard',rank:'Trained',relation:'opposed',powerActor:false,companion:false}],explicitIntimidationOrCoercion:false,intimacyAdvanceExplicit:false,scene:{publicWitnesses:true,danger:'active'},memoryFacts:[],namesNeeded:[],powerActorSignals:[]});
 const r1=resolveTurn(state,sem,'fp','stable-seed',{randomEvents:true,randomEventChance:.08,proactivity:true,nameStyle:'Balanced Fantasy'});

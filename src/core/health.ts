@@ -26,11 +26,19 @@ export function healingForOutcome(tier: OutcomeTier, magic: boolean): number {
 }
 export function safeSceneHealing(magic:boolean):number { return magic ? 9 : 3; }
 
+export function healingDcForCondition(condition:HealthCondition):number {
+  return ({healthy:13,bruised:13,wounded:16,badly_wounded:19,critical:19,incapacitated:19,dead:19} as const)[condition];
+}
+
+export function healingDcForActor(actor:HealthActor):number { return healingDcForCondition(conditionFromActor(actor)); }
+
 export function applyDamage(actor: HealthActor, amount: number, nonlethal = false, fatal = false): void {
   if (actor.dead) return;
   const dmg = Math.max(0, Math.floor(amount));
   actor.currentHp = fatal ? 0 : Math.max(0, actor.currentHp - dmg);
   actor.lastDamageAt = Date.now();
+  actor.lastDamageStateKey = `damage:${actor.lastDamageAt}:${actor.currentHp}/${actor.maxHp}`;
+  actor.naturalTreatmentKey = '';
   if (fatal || (actor.currentHp <= 0 && !nonlethal)) {
     actor.dead = true;
     actor.nonlethalDefeat = false;
@@ -40,10 +48,19 @@ export function applyDamage(actor: HealthActor, amount: number, nonlethal = fals
   }
 }
 
-export function applyHeal(actor: HealthActor, amount: number): void {
-  if (actor.dead) return;
-  actor.currentHp = Math.min(actor.maxHp, actor.currentHp + Math.max(0, Math.floor(amount)));
+export function applyHeal(actor: HealthActor, amount: number, naturalTreatment=false): boolean {
+  if (actor.dead) return false;
+  const heal=Math.max(0,Math.floor(amount)); if(!heal)return false;
+  if(naturalTreatment){
+    const damageKey=actor.lastDamageStateKey||`state:${actor.currentHp}/${actor.maxHp}`;
+    if(actor.naturalTreatmentKey===damageKey)return false;
+    actor.naturalTreatmentKey=damageKey;actor.naturalTreatmentAt=Date.now();
+  }
+  const before=actor.currentHp;
+  actor.currentHp = Math.min(actor.maxHp, actor.currentHp + heal);
   if (actor.currentHp > 0) actor.nonlethalDefeat = false;
+  if(actor.currentHp>=actor.maxHp)actor.naturalTreatmentKey='';
+  return actor.currentHp!==before;
 }
 
 export function getActorHealth(state: StoryState, targetType: 'user' | 'npc', target = ''): HealthActor | null {
@@ -51,12 +68,12 @@ export function getActorHealth(state: StoryState, targetType: 'user' | 'npc', ta
   return state.health.npcs[target] ?? null;
 }
 
-export function applyHealthEvents(state: StoryState, events: Array<{ targetType:'user'|'npc'; target:string; kind:'damage'|'heal'; amount:number; nonlethal?:boolean; fatal?:boolean }>): void {
+export function applyHealthEvents(state: StoryState, events: Array<{ targetType:'user'|'npc'; target:string; kind:'damage'|'heal'; amount:number; nonlethal?:boolean; fatal?:boolean; naturalTreatment?:boolean }>): void {
   for (const event of events) {
     const actor = getActorHealth(state, event.targetType, event.target);
     if (!actor) continue;
     if (event.kind === 'damage') applyDamage(actor, event.amount, event.nonlethal, event.fatal);
-    else applyHeal(actor, event.amount);
+    else applyHeal(actor, event.amount, event.naturalTreatment===true);
     if (event.targetType === 'npc' && state.npcs[event.target]) {
       const c = conditionFromActor(actor);
       if (c === 'dead') state.npcs[event.target]!.status = 'dead';

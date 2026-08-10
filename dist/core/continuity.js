@@ -10,7 +10,7 @@ export function applyContinuitySemantic(state, sem) {
         if (!actor.name)
             continue;
         const key = actor.name;
-        const clock = state.continuity.rapportClocks[key] ?? { lastInteractionAt: 0, lastMeaningfulAt: 0, cooldownUntil: 0, partnerMeaningfulUntil: 0 };
+        const clock = state.continuity.rapportClocks[key] ?? { rapport: 0, lastInteractionAt: 0, lastMeaningfulAt: 0, cooldownUntil: 0, partnerMeaningfulUntil: 0 };
         const meaningful = actor.relation === 'benefited' || actor.relation === 'harmed' || actor.relation === 'opposed' || sem.actions.some(a => a.target.toLowerCase() === key.toLowerCase());
         const wasActive = clock.lastInteractionAt > 0 && now - clock.lastInteractionAt <= RAPPORT_ACTIVE_IDLE_LIMIT_MS;
         clock.lastInteractionAt = now;
@@ -89,17 +89,29 @@ export function archiveDescription(state, input) {
     const description = clean(input?.description, 700);
     if (!label || !description)
         return;
-    const kind = ['npc', 'place', 'organization', 'object', 'other'].includes(String(input?.kind)) ? input.kind : 'other';
+    const kind = ['npc', 'place', 'location', 'organization', 'faction', 'event', 'object', 'other'].includes(String(input?.kind)) ? input.kind : 'other';
     const key = `${kind}|${label.toLowerCase()}`;
+    const history = cleanList(input?.historyAdd ?? input?.history, 12, 400);
+    const connections = cleanList(input?.connectionsAdd ?? input?.connections, 12, 180);
+    const evidence = cleanList(input?.evidence, 8, 500);
     const existing = state.continuity.descriptiveArchive.find(x => `${x.kind}|${x.label.toLowerCase()}` === key);
     if (existing) {
         existing.description = description;
         existing.lastSeenTurn = state.turn;
         if (input?.promotedName)
             existing.promotedName = clean(input.promotedName, 120);
+        if (input?.affiliation)
+            existing.affiliation = clean(input.affiliation, 180);
+        if (input?.lastKnownStatus)
+            existing.lastKnownStatus = clean(input.lastKnownStatus, 220);
+        if (input?.lastKnownLocation)
+            existing.lastKnownLocation = clean(input.lastKnownLocation, 220);
+        existing.history = mergeClean(existing.history, history, 12);
+        existing.connections = mergeClean(existing.connections, connections, 12);
+        existing.evidence = mergeClean(existing.evidence, evidence, 10);
         return;
     }
-    state.continuity.descriptiveArchive.push({ id: `da_${hash32(`${key}|${state.turn}`).toString(36)}`, label, kind, description, promotedName: clean(input?.promotedName, 120) || undefined, firstSeenTurn: state.turn, lastSeenTurn: state.turn });
+    state.continuity.descriptiveArchive.push({ id: `da_${hash32(`${key}|${state.turn}`).toString(36)}`, label, kind, description, promotedName: clean(input?.promotedName, 120) || undefined, affiliation: clean(input?.affiliation, 180) || undefined, history, connections, lastKnownStatus: clean(input?.lastKnownStatus, 220) || undefined, lastKnownLocation: clean(input?.lastKnownLocation, 220) || undefined, evidence, firstSeenTurn: state.turn, lastSeenTurn: state.turn });
 }
 export function consumeThreadsForActor(state, actor) {
     for (const list of [state.continuity.latentFavors, state.continuity.latentGrievances])
@@ -175,5 +187,14 @@ function upsertWorldArc(state, actor, goal, magnitude) {
     arc.pressure = Math.min(5, Math.max(arc.pressure, magnitude));
     arc.lastAdvancedTurn = state.turn;
 }
+function cleanList(value, limit, max) { const source = Array.isArray(value) ? value : []; const out = []; const seen = new Set(); for (const raw of source) {
+    const v = clean(raw, max);
+    const k = v.toLowerCase();
+    if (v && !seen.has(k)) {
+        seen.add(k);
+        out.push(v);
+    }
+} return out.slice(-limit); }
+function mergeClean(a, b, limit) { return cleanList([...(a || []), ...b], limit, 500); }
 function normalizeKind(v) { return String(v || '').trim().toLowerCase().replace(/[\s-]+/g, '_'); }
 function clean(v, max) { return String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, max); }

@@ -12,7 +12,7 @@ import { applyHealthEvents, applyNaturalRecovery, increaseMilestoneHealth } from
 import { applyTransaction } from './core/economy.js';
 import { applyPowerActorSignals, applyWorldSemantic, addMemoryFact } from './core/world.js';
 import { applyContinuitySemantic, archiveDescription, consumeThreadsForActor, resolveBoundary, upsertKnowledge } from './core/continuity.js';
-import { collectProseFindings, proseRepairPrompt, stripStructuredArtifacts } from './core/prose.js';
+import { applyProseRepairPayload, buildProseRepairCases, collectProseFindings, proseRepairPrompt, proseRepairTool, stripStructuredArtifacts } from './core/prose.js';
 import { applyPlayerToState, buildCharacterPrompt, buildPersonaConversionPrompt, characterTool, normalizeCharacterSheet, normalizeConvertedPersonaSheet, renderPersonaDescription, validateCharacterInput, normalizeStartingStatBudget, type CharacterDraftInput } from './core/character.js';
 import { applyMutationBatch, bootstrapAssistantPrompt, commandAssistantPrompt, extractOocCommands, mutationTool, normalizeMutationBatch, stripOocCommands } from './core/commands.js';
 
@@ -29,13 +29,26 @@ let chatEventsRegistered = false;
 function has(permission:string):boolean { try { return spindle.permissions?.has ? spindle.permissions.has(permission) : true; } catch { return false; } }
 function errorMessage(err:any):string{return err instanceof Error?err.message:String(err||'');}
 async function quietForUser(input:any,userId?:string):Promise<any>{
-  // Real operator-scoped Lumiverse builds require the originating user context for
-  // direct sidecar generation even when connection_id is explicit. The public docs
-  // currently show quiet(input), while the runtime accepts/needs the scoped second
-  // argument in operator mode. Supplying an extra JS argument is harmless on builds
-  // that infer scope automatically.
-  if(userId)return spindle.generate.quiet(input,userId);
-  return spindle.generate.quiet(input);
+  if(!userId)return spindle.generate.quiet(input);
+  // Lumiverse's published GenerationRequestDTO currently omits userId, while real
+  // operator-scoped runtimes can require it. Carry it both in the request and as the
+  // legacy/scoped second argument so either runtime shape has the originating user.
+  const scoped={...input,userId};
+  try{return await spindle.generate.quiet(scoped,userId);}
+  catch(err){
+    const message=errorMessage(err);
+    // A scope failure happens before provider dispatch, so a single raw-provider
+    // retry is safe and covers runtimes whose quiet wrapper does not forward userId.
+    if(/userId is required for operator-scoped extensions/i.test(message) && typeof spindle.generate?.raw==='function'){
+      return spindle.generate.raw(scoped,userId);
+    }
+    // Older strict DTO validators may reject the extra field while accepting the
+    // second scoped argument.
+    if(/(?:unknown|unexpected|unrecognized|additional).*userId/i.test(message)){
+      return spindle.generate.quiet(input,userId);
+    }
+    throw err;
+  }
 }
 async function getActivePersonaForUser(userId?:string):Promise<any|null>{
   try{
@@ -362,7 +375,7 @@ async function finalizeGeneration(chatId:string,messageId:string,generationId:st
 
   const notes=commitResolution(state,resolution,settings,chatId);
   if(settings.trackerPostPass && has('generation')){
-    try{ const delta=await extractPostTurnDelta(state,resolution,content,settings,userId); applyPostTurnDelta(state,delta,notes); }
+    try{ const delta=await extractPostTurnDelta(state,resolution,content,settings,userId); applyPostTurnDelta(state,delta,notes,content,resolution); }
     catch(err){ notes.push(`Post-turn archivist skipped: ${String(err)}`); }
   }
   state.pending=null; state.lastResolution={...resolution,replay:false};
@@ -404,11 +417,13 @@ async function repairProse(content:string,findings:ProseFinding[],settings:Story
   try{
     const connection=await resolveConnectionId(settings.proseGuardConnectionId,settings.semanticConnectionId,'',userId);
     if(!connection)return content;
-    const result=await quietForUser({messages:[{role:'user',content:proseRepairPrompt(content,findings)}],parameters:{temperature:0.1,max_tokens:Math.max(600,Math.ceil(content.length/2))},connection_id:connection,reasoning:{source:'off'}},userId);
-    const repaired=stripStructuredArtifacts(String(result?.content||'')).trim();
-    if(!repaired) return content;
-    if(repaired.length<content.length*.55 || repaired.length>content.length*1.55) return content;
-    return repaired;
+    const cases=buildProseRepairCases(content,findings);
+    if(!cases.length)return content;
+    const result=await quietForUser({messages:[{role:'user',content:proseRepairPrompt(content,findings)}],tools:[proseRepairTool(cases)],parameters:{temperature:0.05,max_tokens:Math.max(500,cases.length*120)},connection_id:connection,reasoning:{source:'off'}},userId);
+    const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_prose_repairs')||result?.tool_calls?.[0];
+    const payload=call?.args??parseJsonContent(result?.content);
+    if(!payload)return content;
+    return applyProseRepairPayload(content,cases,payload,settings.proseGuardExtraPhrases).text;
   }catch(err){spindle.log?.warn?.(`Prose repair failed: ${String(err)}`);return content;}
 }
 
@@ -420,15 +435,30 @@ async function extractPostTurnDelta(state:StoryState,resolution:TurnResolution,n
   return call?.args ?? parseJsonContent(result?.content) ?? {};
 }
 
-function applyPostTurnDelta(state:StoryState,delta:any,notes:string[]){
+function applyPostTurnDelta(state:StoryState,delta:any,notes:string[],narration='',resolution?:TurnResolution){
   const d=object(delta);
-  if(Array.isArray(d.presentNpcs)){state.world.presentNpcs=[...new Set(d.presentNpcs.map((x:any)=>text(x).slice(0,120)).filter(Boolean))].slice(0,40);for(const name of state.world.presentNpcs){const npc=state.npcs[name];if(npc){npc.lastSeenTurn=state.turn;if(npc.status==='inactive')npc.status='active';}}}
+  if(Array.isArray(d.presentNpcs)){
+    state.world.presentNpcs=[...new Set(d.presentNpcs.map((x:any)=>text(x).slice(0,120)).filter(Boolean))].slice(0,40);
+    for(const name of state.world.presentNpcs){const npc=state.npcs[name];if(npc){npc.lastSeenTurn=state.turn;if(npc.status==='inactive')npc.status='active';}}
+  }
+
+  const playerDelta=object(d.playerUpdate);
+  if(state.player && Object.keys(playerDelta).length){
+    state.player.inventory=applyStringDelta(state.player.inventory,playerDelta.inventoryAdd,playerDelta.inventoryRemove,60);
+    state.player.gear=applyStringDelta(state.player.gear,playerDelta.gearAdd,playerDelta.gearRemove,40);
+    const userCap=injurySeverityCap(resolution,'user','');
+    state.player.wounds=applyStringDelta(state.player.wounds,capPersistentEffects(playerDelta.woundsAdd,userCap),playerDelta.woundsRemove,30);
+    state.player.conditions=applyStringDelta(state.player.conditions,capPersistentEffects(playerDelta.conditionsAdd,userCap),playerDelta.conditionsRemove,30);
+    state.player.tasks=applyStringDelta(state.player.tasks,playerDelta.tasksAdd,playerDelta.tasksRemove,40);
+    state.player.commitments=applyStringDelta(state.player.commitments,playerDelta.commitmentsAdd,playerDelta.commitmentsRemove,40);
+  }
+
   for(const f of Array.isArray(d.facts)?d.facts:[]){ const o=object(f); if(text(o.fact)) addMemoryFact(state,text(o.fact),['scene','location','world','user','npc'].includes(String(o.scope))?o.scope:'world',text(o.subject)||undefined,Math.max(1,Math.min(5,Number(o.salience||2)))); }
   for(const u of Array.isArray(d.npcUpdates)?d.npcUpdates:[]){
     const o=object(u); const name=text(o.name); if(!name)continue; const renameFrom=text(o.renameFrom);
     if(renameFrom && renameFrom!==name && state.npcs[renameFrom]){
       const source=state.npcs[renameFrom]!; const target=state.npcs[name];
-      state.npcs[name]=target?{...source,...target,name,notes:[...source.notes,...target.notes].slice(-20),relationshipDescriptors:[...new Set([...(source.relationshipDescriptors||[]),...(target.relationshipDescriptors||[])])].slice(-16)}:{...source,name}; delete state.npcs[renameFrom];
+      state.npcs[name]=target?{...source,...target,name,aliases:[...new Set([...(source.aliases||[]),...(target.aliases||[]),renameFrom])].slice(-20),notes:[...source.notes,...target.notes].slice(-20),relationshipDescriptors:[...new Set([...(source.relationshipDescriptors||[]),...(target.relationshipDescriptors||[])])].slice(-16)}:{...source,name,aliases:[...new Set([...(source.aliases||[]),renameFrom])].slice(-20)}; delete state.npcs[renameFrom];
       if(state.health.npcs[renameFrom]){state.health.npcs[name]=state.health.npcs[name]??state.health.npcs[renameFrom]!;delete state.health.npcs[renameFrom];}
       for(const plan of state.world.plans) if(plan.actor===renameFrom) plan.actor=name;
       state.world.presentNpcs=state.world.presentNpcs.map(x=>x===renameFrom?name:x);
@@ -438,17 +468,80 @@ function applyPostTurnDelta(state:StoryState,delta:any,notes:string[]){
       for(const t of [...state.continuity.latentFavors,...state.continuity.latentGrievances])if(t.actor===renameFrom)t.actor=name;
       for(const arc of state.continuity.worldArcs)if(arc.actor===renameFrom)arc.actor=name;
       if(state.continuity.rapportClocks[renameFrom]){state.continuity.rapportClocks[name]=state.continuity.rapportClocks[name]??state.continuity.rapportClocks[renameFrom]!;delete state.continuity.rapportClocks[renameFrom];}
-      for(const d of state.continuity.descriptiveArchive)if(d.label===renameFrom&&!d.promotedName)d.promotedName=name;
+      for(const desc of state.continuity.descriptiveArchive)if(desc.label===renameFrom&&!desc.promotedName)desc.promotedName=name;
       notes.push(`Tracker name promoted: ${renameFrom} -> ${name}.`);
     }
-    const npc=ensureNpc(state,name,'Average',text(o.role)||'NPC',`post|${state.turn}`); if(text(o.role))npc.role=text(o.role); if(['active','inactive','dead'].includes(String(o.status)))npc.status=o.status; if(typeof o.companion==='boolean')npc.companion=o.companion;if(typeof o.powerActor==='boolean')npc.powerActor=o.powerActor;if(text(o.personalityArchetype))npc.personalityArchetype=text(o.personalityArchetype).slice(0,80);if(text(o.personalitySummary))npc.personalitySummary=text(o.personalitySummary).slice(0,500);if(Array.isArray(o.relationshipDescriptors)){const merged=[...(npc.relationshipDescriptors||[])];const seen=new Set(merged.map((x:string)=>x.toLowerCase()));for(const raw of o.relationshipDescriptors){const v=text(raw).slice(0,100);if(v&&!seen.has(v.toLowerCase())){merged.push(v);seen.add(v.toLowerCase());}}npc.relationshipDescriptors=merged.slice(-16);}if(text(o.note))npc.notes=[...npc.notes,text(o.note)].slice(-20); enforceRelationshipInvariants(npc);
+    const npc=ensureNpc(state,name,'Average',text(o.role)||'NPC',`post|${state.turn}`);
+    if(text(o.role))npc.role=text(o.role);
+    if(['active','inactive','dead'].includes(String(o.status)))npc.status=o.status;
+    if(typeof o.companion==='boolean')npc.companion=o.companion;
+    if(typeof o.powerActor==='boolean')npc.powerActor=o.powerActor;
+    if(text(o.personalityArchetype))npc.personalityArchetype=text(o.personalityArchetype).slice(0,80);
+    if(text(o.personalitySummary))npc.personalitySummary=text(o.personalitySummary).slice(0,500);
+    if(['auto','nervous','flirt'].includes(String(o.romanceStyle)))npc.romanceStyle=o.romanceStyle;
+    if(['none','aware','constrained'].includes(String(o.standingInfluence))){npc.standingInfluence=o.standingInfluence;npc.standingBasis=o.standingInfluence==='none'?undefined:(text(o.standingBasis).slice(0,240)||npc.standingBasis);}
+    if(Array.isArray(o.relationshipDescriptors))npc.relationshipDescriptors=mergeUniqueStrings(npc.relationshipDescriptors,o.relationshipDescriptors,16);
+    if(Array.isArray(o.aliasesAdd))npc.aliases=mergeUniqueStrings(npc.aliases,o.aliasesAdd,20);
+    npc.inventory=applyStringDelta(npc.inventory,o.inventoryAdd,o.inventoryRemove,60);
+    npc.gear=applyStringDelta(npc.gear,o.gearAdd,o.gearRemove,40);
+    const npcCap=injurySeverityCap(resolution,'npc',name);
+    npc.wounds=applyStringDelta(npc.wounds,capPersistentEffects(o.woundsAdd,npcCap),o.woundsRemove,30);
+    npc.conditions=applyStringDelta(npc.conditions,capPersistentEffects(o.conditionsAdd,npcCap),o.conditionsRemove,30);
+    npc.currency=applyCurrencyDeltaList(npc.currency,o.currencyAdd,o.currencyRemove);
+    if(text(o.note))npc.notes=[...npc.notes,text(o.note)].slice(-20);
+    enforceRelationshipInvariants(npc);
   }
   for(const r of Array.isArray(d.reputation)?d.reputation:[]){ const o=object(r),loc=text(o.location);if(!loc)continue;let entry=state.reputation.find(x=>x.location.toLowerCase()===loc.toLowerCase());if(!entry){entry={location:loc,fame:0,infamy:0,fear:0,notes:[]};state.reputation.push(entry);}entry.fame=Math.max(-20,Math.min(20,entry.fame+Number(o.fameDelta||0)));entry.infamy=Math.max(-20,Math.min(20,entry.infamy+Number(o.infamyDelta||0)));entry.fear=Math.max(-20,Math.min(20,entry.fear+Number(o.fearDelta||0)));if(text(o.note))entry.notes=[...entry.notes,text(o.note)].slice(-12);}
   for(const k of Array.isArray(d.knowledge)?d.knowledge:[])upsertKnowledge(state,k);
-  for(const a of Array.isArray(d.descriptions)?d.descriptions:[])archiveDescription(state,a);
+  for(const a of Array.isArray(d.descriptions)?d.descriptions:[]){
+    const o=object(a),evidence=Array.isArray(o.evidence)?o.evidence.map((x:any)=>text(x)).filter(Boolean):[];
+    if(!evidence.some((q:string)=>groundedQuote(narration,q))){notes.push(`Archive update rejected as ungrounded: ${text(o.label)||'(unknown)'}.`);continue;}
+    archiveDescription(state,o);
+  }
+  for(const raw of Array.isArray(d.plansCreate)?d.plansCreate:[]){
+    const o=object(raw),actor=text(o.actor),objective=text(o.objective),cause=text(o.cause);
+    if(!actor||!objective||!cause||!groundedQuote(narration,cause))continue;
+    if(actor==='{{user}}'||(state.player&&sameNameText(actor,state.player.name))){notes.push(`World plan rejected for player actor: ${actor}.`);continue;}
+    if(state.world.plans.filter(p=>p.status==='pending'||p.status==='due').length>=18)continue;
+    const id=`plan_${fingerprintText(`${actor}|${objective}|${state.turn}`)}`;if(state.world.plans.some(p=>p.id===id))continue;
+    const kind=['scheduled','npc','faction','power_actor'].includes(String(o.kind))?o.kind:'npc';
+    const evidence=(Array.isArray(o.evidence)?o.evidence:[]).slice(0,8).map((rawEvidence:any,index:number)=>{const e=object(rawEvidence);const route=['location','actor','news','investigation'].includes(String(e.route))?e.route:'news';const evidenceText=text(e.text).slice(0,500);return{id:`we_${fingerprintText(`${id}|${index}|${evidenceText}`)}`,topic:text(e.topic).slice(0,160),text:evidenceText,route,location:text(e.location)||undefined,actor:text(e.actor)||undefined,discovered:false};}).filter((e:any)=>e.text);
+    state.world.plans.push({id,actor,intent:objective,kind,cause,consequences:(Array.isArray(o.consequences)?o.consequences:[]).map((x:any)=>text(x).slice(0,300)).filter(Boolean).slice(0,8),evidence,createdTurn:state.turn,updatedTurn:state.turn,dueTurn:state.turn+Math.max(1,Math.min(120,Math.floor(Number(o.delayTurns||1)))),status:'pending'});
+  }
+  for(const raw of Array.isArray(d.plansCancel)?d.plansCancel:[]){const o=object(raw),id=text(o.planId),reason=text(o.reason);const plan=state.world.plans.find(p=>p.id===id&&(p.status==='pending'||p.status==='due'));if(plan&&groundedQuote(narration,reason)){plan.status='cancelled';plan.cancellationReason=reason;plan.updatedTurn=state.turn;}}
+  for(const raw of Array.isArray(d.discoveries)?d.discoveries:[]){const o=object(raw),plan=state.world.plans.find(p=>p.id===text(o.planId));const evidence=plan?.evidence?.find(e=>e.id===text(o.evidenceId));const quote=text(o.quote);if(evidence&&!evidence.discovered&&groundedQuote(narration,quote)){evidence.discovered=true;evidence.discoveredTurn=state.turn;}}
   for(const id of Array.isArray(d.resolvedBoundaryIds)?d.resolvedBoundaryIds:[])resolveBoundary(state,String(id));
   if(d.transaction) notes.push(...applyTransaction(state,d.transaction));
-  const completed=new Set(Array.isArray(d.completedPlanIds)?d.completedPlanIds.map(String):[]); for(const p of state.world.plans)if(completed.has(p.id)){p.status='completed';consumeThreadsForActor(state,p.actor);for(const arc of state.continuity.worldArcs)if(arc.actor===p.actor&&arc.status==='active')arc.status='completed';}
+  const completed=new Set(Array.isArray(d.completedPlanIds)?d.completedPlanIds.map(String):[]); for(const plan of state.world.plans)if(completed.has(plan.id)){plan.status='completed';plan.updatedTurn=state.turn;consumeThreadsForActor(state,plan.actor);for(const arc of state.continuity.worldArcs)if(arc.actor===plan.actor&&arc.status==='active')arc.status='completed';}
+}
+function groundedQuote(narration:string,quote:string):boolean{const norm=(v:string)=>v.replace(/\s+/g,' ').trim().toLowerCase();const q=norm(quote);return Boolean(q&&norm(narration).includes(q));}
+function sameNameText(a:string,b:string):boolean{return a.trim().toLowerCase()===b.trim().toLowerCase();}
+type InjuryCap='minor'|'moderate'|'severe'|'critical'|null;
+function injurySeverityCap(resolution:TurnResolution|undefined,targetType:'user'|'npc',target:string):InjuryCap{
+  if(!resolution)return null;let max=0;for(const e of resolution.healthEvents){if(e.kind!=='damage'||e.targetType!==targetType)continue;if(targetType==='npc'&&!sameNameText(e.target,target))continue;max=Math.max(max,Number(e.amount||0));if(e.fatal)return'critical';}
+  return max>=9?'critical':max>=6?'moderate':max>0?'minor':null;
+}
+function capPersistentEffects(items:any,cap:InjuryCap):any{
+  if(!cap||!Array.isArray(items))return items;const rank={minor:1,moderate:2,severe:3,critical:4}[cap];
+  return items.filter(raw=>{const v=text(raw).toLowerCase();if(!v)return false;if(rank<4&&/\b(dead|dying|fatal|severed|amputated|missing|shattered|crushed|paraly[sz]ed|paralysis|unconscious|ruptured|broken spine|broken neck)\b/.test(v))return false;if(rank<3&&/\b(broken|fractured|dislocated|crippled|deep wound|heavy bleeding|bleeding heavily|gouged|impaled|stabbed|pierced|mangled|blinded)\b/.test(v))return false;if(rank<2&&!/\b(minor|small|shallow|superficial|light|surface|scratch|scratched|nick|bruise|bruised)\b/.test(v)&&/\b(sprained|strained|poisoned|sickened|stunned|concussed|concussion|exhausted|numb|wounded|breathing trouble)\b/.test(v))return false;return true;});
+}
+function mergeUniqueStrings(existing:string[],incoming:any,limit:number):string[]{
+  const out=[...(existing||[])],seen=new Set(out.map(x=>x.toLowerCase()));
+  for(const raw of Array.isArray(incoming)?incoming:[]){const value=text(raw).slice(0,180);if(value&&!seen.has(value.toLowerCase())){out.push(value);seen.add(value.toLowerCase());}}
+  return out.slice(-limit);
+}
+function applyStringDelta(existing:string[],adds:any,removes:any,limit:number):string[]{
+  let out=[...(existing||[])];
+  const removal=new Set((Array.isArray(removes)?removes:[]).map((x:any)=>text(x).toLowerCase()).filter(Boolean));
+  if(removal.size)out=out.filter(x=>!removal.has(x.toLowerCase()));
+  return mergeUniqueStrings(out,adds,limit);
+}
+function applyCurrencyDeltaList(existing:any[],adds:any,removes:any):any[]{
+  const map=new Map<string,{currency:string;amount:number}>();
+  for(const raw of existing||[]){const o=object(raw),currency=text(o.currency),amount=Number(o.amount||0);if(currency&&Number.isFinite(amount))map.set(currency.toLowerCase(),{currency,amount});}
+  const apply=(items:any,sign:number)=>{for(const raw of Array.isArray(items)?items:[]){const o=object(raw),currency=text(o.currency),amount=Number(o.amount||0);if(!currency||!Number.isFinite(amount))continue;const key=currency.toLowerCase(),prev=map.get(key)||{currency,amount:0};prev.amount+=sign*Math.abs(amount);map.set(key,prev);}};
+  apply(adds,1);apply(removes,-1);
+  return[...map.values()].filter(x=>Math.abs(x.amount)>1e-9).slice(-30);
 }
 
 async function activeChatId(userId?:string,hint=''):Promise<string>{
@@ -541,8 +634,11 @@ async function handleCreatePlayer(chatId:string,payload:any,userId:string){
   const input=payload.input as CharacterDraftInput; const errors=validateCharacterInput(input);if(errors.length)throw new Error(errors.join(' '));
   const settings=await loadSettings(userId);
   const personaConnection=requireConnection(await resolveConnectionId(settings.personaConnectionId,settings.semanticConnectionId,'',userId),'character creation');
-  const result=await quietForUser({messages:buildCharacterPrompt(input),tools:[characterTool()],parameters:{temperature:.35,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
+  const result=await quietForUser({messages:buildCharacterPrompt(input),tools:[characterTool('new',input.stats)],parameters:{temperature:.35,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_character_sheet')||result?.tool_calls?.[0]; const sheet=normalizeCharacterSheet(call?.args??parseJsonContent(result?.content)??{},input);
+  if(sheet.abilities.length!==1)throw new Error('Character assistant must return exactly one starting ability. Try again or choose a different assistant connection.');
+  if(sheet.stats.MND>=7&&sheet.spells.length!==1)throw new Error('Character assistant must return exactly one starting spell when MND is 7 or higher.');
+  if(sheet.stats.MND<7&&sheet.spells.length)throw new Error('Character assistant returned a starting spell even though MND is below 7.');
   const state=await loadState(chatId);applyPlayerToState(state,sheet);await saveState(chatId,state);
   if(payload.applyMode==='new_persona')await createAndSwitchStoryPersona(sheet,undefined,userId);
   spindle.toast?.success?.('Player sheet created.');spindle.sendToFrontend({type:'player_created',sheet},userId);await sendDashboard(userId,chatId);
@@ -552,7 +648,7 @@ async function handleConvertActivePersona(chatId:string,userId:string){
   const source=await getActivePersonaForUser(userId);if(!source)throw new Error('No active persona is selected.');
   const settings=await loadSettings(userId);
   const personaConnection=requireConnection(await resolveConnectionId(settings.personaConnectionId,settings.semanticConnectionId,'',userId),'persona conversion');
-  const result=await quietForUser({messages:buildPersonaConversionPrompt(source),tools:[characterTool()],parameters:{temperature:.25,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
+  const result=await quietForUser({messages:buildPersonaConversionPrompt(source),tools:[characterTool('convert')],parameters:{temperature:.25,max_tokens:2200},connection_id:personaConnection,reasoning:{source:'off'}},userId);
   const call=result?.tool_calls?.find((x:any)=>x?.name==='submit_character_sheet')||result?.tool_calls?.[0];const sheet=normalizeConvertedPersonaSheet(call?.args??parseJsonContent(result?.content)??{},source);
   const state=await loadState(chatId);applyPlayerToState(state,sheet);await saveState(chatId,state);
   const created=await createAndSwitchStoryPersona(sheet,source,userId);

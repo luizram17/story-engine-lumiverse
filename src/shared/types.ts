@@ -7,12 +7,26 @@ export type ProseGuardMode = 'off' | 'review' | 'automatic';
 export type TimeSlot = 'morning' | 'afternoon' | 'evening' | 'night';
 export type Weather = 'clear' | 'partly_cloudy' | 'cloudy' | 'overcast' | 'light_rain' | 'heavy_rain' | 'storm';
 export type RomanceStage = 'none' | 'interest' | 'dating' | 'partner';
+export type RomanceStyle = 'auto' | 'nervous' | 'flirt';
+export type StandingInfluence = 'none' | 'aware' | 'constrained';
+export type SlowBondKey = 'respectfulContact' | 'cooperation' | 'comfortInProximity' | 'boundaryRespect' | 'sharedRoutine' | 'playfulness' | 'teamwork' | 'personalAttention';
+
+export interface SlowBondEvidence {
+  counts: Record<SlowBondKey, number>;
+  blockers: string[];
+  lastUpdatedTurn: number;
+}
 
 export interface PlayerSheet {
   name: string;
   race: string;
   genre: string;
   age?: number;
+  gender?: string;
+  userNonHuman?: boolean;
+  bloodline?: string;
+  origin?: string;
+  priorRoleOrTraining?: string;
   appearance: string;
   stats: Record<StatKey, number>;
   naturalWeapons: string[];
@@ -24,6 +38,14 @@ export interface PlayerSheet {
   anchors: string[];
   concept?: string;
   backstory?: string;
+  /** Durable injuries explicitly established in narration. Hidden HP remains authoritative. */
+  wounds: string[];
+  /** Durable non-wound conditions/status effects explicitly established in narration. */
+  conditions: string[];
+  /** Open tasks/objectives explicitly established in the RP. */
+  tasks: string[];
+  /** Promises, obligations, debts, appointments, vows, or other commitments. */
+  commitments: string[];
 }
 
 export interface CurrencyEntry { currency: string; amount: number; }
@@ -36,6 +58,9 @@ export interface HealthActor {
   dead: boolean;
   nonlethalDefeat: boolean;
   lastDamageAt?: number;
+  lastDamageStateKey?: string;
+  naturalTreatmentKey?: string;
+  naturalTreatmentAt?: number;
 }
 export interface HealthState {
   user: HealthActor;
@@ -69,24 +94,38 @@ export interface NpcTrackerEntry {
   lastSocialTactic?: string;
   lastSocialGoal?: string;
   notes: string[];
+  aliases: string[];
   gear: string[];
+  inventory: string[];
   currency: CurrencyEntry[];
+  wounds: string[];
+  conditions: string[];
   introducedTurn: number;
   lastSeenTurn: number;
   lootSearchCompleted: boolean;
   personalityArchetype?: string;
   personalitySummary?: string;
   relationshipDescriptors: string[];
+  romanceStyle: RomanceStyle;
+  standingInfluence: StandingInfluence;
+  standingBasis?: string;
+  slowBondEvidence: SlowBondEvidence;
 }
 
 
 export interface WorldState {
+  /** Location bucket used for local reputation; may be broader than the immediate place. */
+  reputationLocation: string;
   location: string;
   area: string;
   indoors: boolean;
+  positionEstablished: boolean;
   dayIndex: number;
   time: TimeSlot;
+  timeEstablished: boolean;
   weather: Weather;
+  weatherRemainingSlots: number;
+  weatherEstablished: boolean;
   /** Complete list of tracker labels/names physically present in the current scene. */
   presentNpcs: string[];
   facts: MemoryFact[];
@@ -101,10 +140,24 @@ export interface MemoryFact {
   createdTurn: number;
   lastConfirmedTurn: number;
 }
+export type WorldPlanKind = 'scheduled' | 'npc' | 'faction' | 'power_actor';
+export type WorldEvidenceRoute = 'location' | 'actor' | 'news' | 'investigation';
+export interface WorldPlanEvidence {
+  id: string; topic: string; text: string; route: WorldEvidenceRoute;
+  location?: string; actor?: string; discovered: boolean; discoveredTurn?: number;
+}
 export interface WorldPlan {
   id: string;
   actor: string;
+  /** Compact private objective / intended consequence. */
   intent: string;
+  kind?: WorldPlanKind;
+  cause?: string;
+  consequences?: string[];
+  evidence?: WorldPlanEvidence[];
+  createdTurn?: number;
+  updatedTurn?: number;
+  cancellationReason?: string;
   dueTurn: number;
   status: 'pending' | 'due' | 'completed' | 'cancelled';
 }
@@ -140,9 +193,15 @@ export interface LatentRelationshipThread {
 export interface DescriptiveArchiveEntry {
   id: string;
   label: string;
-  kind: 'npc' | 'place' | 'organization' | 'object' | 'other';
+  kind: 'npc' | 'place' | 'location' | 'organization' | 'faction' | 'event' | 'object' | 'other';
   description: string;
   promotedName?: string;
+  affiliation?: string;
+  history: string[];
+  connections: string[];
+  lastKnownStatus?: string;
+  lastKnownLocation?: string;
+  evidence: string[];
   firstSeenTurn: number;
   lastSeenTurn: number;
 }
@@ -167,6 +226,8 @@ export interface PendingBoundaryState {
 }
 
 export interface RapportClockState {
+  /** Upstream-compatible slow rapport accumulator, 0–5. */
+  rapport: number;
   lastInteractionAt: number;
   lastMeaningfulAt: number;
   cooldownUntil: number;
@@ -273,6 +334,11 @@ export interface SemanticActor {
   initialNotes?: string[];
   relationshipContext?: string;
   initialRelationshipDescriptors?: string[];
+  romanceStyle?: RomanceStyle;
+  standingInfluence?: StandingInfluence;
+  standingBasis?: string;
+  slowBondEvidence?: Partial<Record<SlowBondKey, boolean>>;
+  slowBondBlockers?: string[];
   evidence?: string;
 }
 
@@ -287,11 +353,21 @@ export interface SemanticLedger {
   boundaryBreak?: { present: boolean; boundaryId: string; target: string; kind: string; response?: string; evidence?: string };
   claimCheck?: { present: boolean; target: string; claim: string; truth: 'true'|'false'|'uncertain'|'claimed'; access: 'knows_true'|'knows_false'|'can_verify'|'cannot_verify'|'unknown'; stakesImpact: boolean };
   activeHostileThreat?: boolean;
+  /** Exact established living detectors for an explicit stealth attempt. */
+  stealthTargets: string[];
+  /** Third-party NPCs whose concrete stakes materially improve because of the user action. */
+  benefitedObservers: string[];
+  /** Third-party NPCs whose concrete stakes materially worsen because of the user action. */
+  harmedObservers: string[];
+  /** NPCs that individually notice/address/react to the user this turn. */
+  npcAwareOfUser: string[];
   scene: {
+    reputationLocation?: string;
     location?: string;
     area?: string;
     indoors?: boolean;
     timeAdvance?: 0 | 1 | 2 | 3 | 4;
+    timeOfDay?: TimeSlot;
     weather?: Weather | '';
     /** Complete current-scene NPC presence at semantic preflight time. */
     presentNpcs?: string[];
@@ -361,7 +437,7 @@ export interface TurnResolution {
   proactivity: ProactivityResult[];
   randomEvent: RandomEventResult;
   generatedNames: string[];
-  healthEvents: Array<{ targetType: 'user' | 'npc'; target: string; kind: 'damage' | 'heal'; amount: number; nonlethal?: boolean; fatal?: boolean }>;
+  healthEvents: Array<{ targetType: 'user' | 'npc'; target: string; kind: 'damage' | 'heal'; amount: number; nonlethal?: boolean; fatal?: boolean; naturalTreatment?: boolean }>;
   refereeNotes: string[];
   xpAward: number;
   handoff: string;

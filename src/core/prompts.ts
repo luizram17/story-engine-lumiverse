@@ -11,7 +11,7 @@ export function buildStateContext(state:StoryState):string {
   const health=healthSnapshot(state.health);
   const rep=state.reputation.slice(-8).map(r=>`${r.location}: fame ${r.fame}, infamy ${r.infamy}, fear ${r.fear}`).join('; ');
   return [
-    player?`PLAYER: ${player.name}; ${player.race}; genre ${player.genre}; stats PHY ${player.stats.PHY}, MND ${player.stats.MND}, CHA ${player.stats.CHA}; abilities [${player.abilities.join(', ')}]; spells [${player.spells.join(', ')}]; inventory [${player.inventory.join(', ')}]; gear [${player.gear.join(', ')}].`:'PLAYER: no Story Engine sheet configured.',
+    player?`PLAYER: ${player.name}; ${player.race}; genre ${player.genre}; stats PHY ${player.stats.PHY}, MND ${player.stats.MND}, CHA ${player.stats.CHA}; abilities [${player.abilities.join(', ')}]; spells [${player.spells.join(', ')}]; inventory [${player.inventory.join(', ')}]; gear [${player.gear.join(', ')}]; wounds [${player.wounds.join(', ')}]; conditions [${player.conditions.join(', ')}]; tasks [${player.tasks.join(', ')}]; commitments [${player.commitments.join(', ')}].`:'PLAYER: no Story Engine sheet configured.',
     `USER HEALTH: ${health.user.currentHp}/${health.user.maxHp} (${health.user.condition}).`,
     activeNpcs.length?`NPC TRACKER:\n${activeNpcs.map(relationshipSummary).join('\n')}`:'NPC TRACKER: empty.',
     worldSummary(state),
@@ -39,22 +39,46 @@ export function buildNarratorHandoff(state:StoryState,resolution:TurnResolution,
 
 export function buildPostTurnPrompt(state:StoryState,resolution:TurnResolution,narration:string):Array<{role:'system'|'user';content:string}>{
   return [
-    {role:'system',content:`You are a continuity archivist. Read FINAL NARRATION against the deterministic turn handoff and emit only durable state updates that are explicitly established by the final narration. Do not reinterpret dice or alter the outcome. Do not infer private motives. Capture the COMPLETE list of NPCs physically present at the end of FINAL NARRATION in presentNpcs (use tracker names/stable labels; [] if none). Capture: newly learned durable facts; knowledge the user specifically acquires (including scope, truth status and confidence when knowable); stable descriptive identities for unnamed NPCs/places/organizations/objects; explicit NPC role/status/name/relationship-descriptor refinements plus stable personality archetype/summary only when clearly established (when a descriptive tracker label is revealed as a proper name, provide renameFrom with the old label and name with the revealed proper name), completed money changes only when the amount is explicit or a stored quoted price was clearly paid, reputation-worthy public consequences, and completed/due world plans. Omit transient prose details. Call submit_post_turn_delta once.`},
+    {role:'system',content:`You are a continuity archivist. Read FINAL NARRATION against CURRENT STATE and deterministic authority. Emit only durable changes explicitly established by the final narration; never invent hidden consequences or reinterpret dice.
+
+PRESENCE: presentNpcs is the COMPLETE list physically present at the end of the narration.
+
+PLAYER POSSESSION: inventoryAdd only when narration confirms the item entered/remains in the player's possession/control. Merely seeing, finding, being offered, requesting, or reaching an item is not possession. inventoryRemove only when possession/control actually ends (given, spent, dropped, seized, consumed, destroyed, left behind). gearAdd/gearRemove are for worn/equipped gear.
+
+PLAYER CONDITIONS: wounds/conditions are persistent injuries, ailments, restraints or impairments that continue beyond the instant. A hit, pain, flinch, stagger, breath loss, or ordinary effort alone is not a durable wound. tasks are open objectives; commitments are promises, debts, vows, appointments or obligations.
+
+NPC TRACKING: capture revealed aliases/names, durable role/status/relationship/personality refinements, possessions/currency actually established for that NPC, gear changes, and persistent wounds/conditions. Do not move loot from a corpse/NPC to the player until narration establishes transfer.
+
+ECONOMY: completed currency changes require explicit amount/currency or an authoritative pending price that narration clearly says was paid. A quote alone does not spend money. The transaction field is for the player's completed exact currency transaction; NPC currency deltas belong on npcUpdates.
+
+KNOWLEDGE/REPUTATION/WORLD: capture durable facts, user knowledge with epistemic scope/truth/confidence, stable descriptions, reputation-worthy public consequences, world plans and resolved boundaries. Archive/plan creation or cancellation must include a concrete contiguous evidence quote copied from FINAL NARRATION. World plans represent explicit durable intentions, deadlines, threats, promises, projects or faction/power-actor objectives; never schedule future actions for the player. Evidence discoveries may only cite authorized plan evidence that FINAL NARRATION visibly presented. Omit transient prose details and ungrounded private motives. Call submit_post_turn_delta once.`},
     {role:'user',content:`CURRENT STATE:\n${buildStateContext(state)}\n\nTURN SUMMARY:\n${resolution.semantic.summary}\n\nFINAL NARRATION:\n${narration}`}
   ];
 }
 
 export function postTurnTool(){
+  const stringDelta={type:'array',maxItems:30,items:{type:'string'}};
+  const currencyDelta={type:'array',maxItems:12,items:{type:'object',additionalProperties:false,properties:{currency:{type:'string'},amount:{type:'number'}},required:['currency','amount']}};
   return {name:'submit_post_turn_delta',description:'Submit durable post-narration continuity updates.',parameters:{type:'object',additionalProperties:false,properties:{
     presentNpcs:{type:'array',maxItems:40,items:{type:'string'}},
+    playerUpdate:{type:'object',additionalProperties:false,properties:{inventoryAdd:stringDelta,inventoryRemove:stringDelta,gearAdd:stringDelta,gearRemove:stringDelta,woundsAdd:stringDelta,woundsRemove:stringDelta,conditionsAdd:stringDelta,conditionsRemove:stringDelta,tasksAdd:stringDelta,tasksRemove:stringDelta,commitmentsAdd:stringDelta,commitmentsRemove:stringDelta}},
     facts:{type:'array',items:{type:'object',additionalProperties:false,properties:{fact:{type:'string'},scope:{type:'string',enum:['scene','location','world','user','npc']},subject:{type:'string'},salience:{type:'integer',minimum:1,maximum:5}},required:['fact','scope']}},
     knowledge:{type:'array',items:{type:'object',additionalProperties:false,properties:{subject:{type:'string'},fact:{type:'string'},scope:{type:'string',enum:['private','local','route','faction','regional','legendary']},truth:{type:'string',enum:['true','distorted','false','claimed']},confidence:{type:'string',enum:['certain','likely','uncertain']},source:{type:'string'}},required:['fact','scope','truth','confidence']}},
-    descriptions:{type:'array',items:{type:'object',additionalProperties:false,properties:{label:{type:'string'},kind:{type:'string',enum:['npc','place','organization','object','other']},description:{type:'string'},promotedName:{type:'string'}},required:['label','kind','description']}},
-    npcUpdates:{type:'array',items:{type:'object',additionalProperties:false,properties:{name:{type:'string'},renameFrom:{type:'string'},role:{type:'string'},status:{type:'string',enum:['active','inactive','dead']},companion:{type:'boolean'},powerActor:{type:'boolean'},personalityArchetype:{type:'string'},personalitySummary:{type:'string'},relationshipDescriptors:{type:'array',items:{type:'string'},maxItems:12},note:{type:'string'}},required:['name']}},
+    descriptions:{type:'array',items:{type:'object',additionalProperties:false,properties:{label:{type:'string'},kind:{type:'string',enum:['npc','place','location','organization','faction','event','object','other']},description:{type:'string'},promotedName:{type:'string'},affiliation:{type:'string'},historyAdd:stringDelta,connectionsAdd:stringDelta,lastKnownStatus:{type:'string'},lastKnownLocation:{type:'string'},evidence:{type:'array',maxItems:4,items:{type:'string'}}},required:['label','kind','description','evidence']}},
+    npcUpdates:{type:'array',items:{type:'object',additionalProperties:false,properties:{
+      name:{type:'string'},renameFrom:{type:'string'},aliasesAdd:stringDelta,role:{type:'string'},status:{type:'string',enum:['active','inactive','dead']},companion:{type:'boolean'},powerActor:{type:'boolean'},
+      personalityArchetype:{type:'string'},personalitySummary:{type:'string'},relationshipDescriptors:{type:'array',items:{type:'string'},maxItems:12},
+      romanceStyle:{type:'string',enum:['auto','nervous','flirt']},standingInfluence:{type:'string',enum:['none','aware','constrained']},standingBasis:{type:'string'},
+      inventoryAdd:stringDelta,inventoryRemove:stringDelta,gearAdd:stringDelta,gearRemove:stringDelta,woundsAdd:stringDelta,woundsRemove:stringDelta,conditionsAdd:stringDelta,conditionsRemove:stringDelta,
+      currencyAdd:currencyDelta,currencyRemove:currencyDelta,note:{type:'string'}
+    },required:['name']}},
     reputation:{type:'array',items:{type:'object',additionalProperties:false,properties:{location:{type:'string'},fameDelta:{type:'integer',minimum:-3,maximum:3},infamyDelta:{type:'integer',minimum:-3,maximum:3},fearDelta:{type:'integer',minimum:-3,maximum:3},note:{type:'string'}},required:['location','fameDelta','infamyDelta','fearDelta']}},
     transaction:{type:'object',additionalProperties:false,properties:{kind:{type:'string',enum:['none','gain','lose','pay']},amount:{type:'number'},currency:{type:'string'},item:{type:'string'}},required:['kind']},
+    plansCreate:{type:'array',maxItems:2,items:{type:'object',additionalProperties:false,properties:{actor:{type:'string'},kind:{type:'string',enum:['scheduled','npc','faction','power_actor']},objective:{type:'string'},cause:{type:'string'},delayTurns:{type:'integer',minimum:1,maximum:120},consequences:{type:'array',maxItems:8,items:{type:'string'}},evidence:{type:'array',maxItems:8,items:{type:'object',additionalProperties:false,properties:{topic:{type:'string'},text:{type:'string'},route:{type:'string',enum:['location','actor','news','investigation']},location:{type:'string'},actor:{type:'string'}},required:['topic','text','route']}}},required:['actor','kind','objective','cause','delayTurns','consequences','evidence']}},
+    plansCancel:{type:'array',maxItems:2,items:{type:'object',additionalProperties:false,properties:{planId:{type:'string'},reason:{type:'string'}},required:['planId','reason']}},
+    discoveries:{type:'array',maxItems:4,items:{type:'object',additionalProperties:false,properties:{planId:{type:'string'},evidenceId:{type:'string'},quote:{type:'string'}},required:['planId','evidenceId','quote']}},
     completedPlanIds:{type:'array',items:{type:'string'}},resolvedBoundaryIds:{type:'array',items:{type:'string'}}
-  },required:['presentNpcs','facts','knowledge','descriptions','npcUpdates','reputation','completedPlanIds','resolvedBoundaryIds']}};
+  },required:['presentNpcs','facts','knowledge','descriptions','npcUpdates','reputation','plansCreate','plansCancel','discoveries','completedPlanIds','resolvedBoundaryIds']}};
 }
 
 function healthShort(state:StoryState,name:string){const h=state.health.npcs[name];if(!h)return'unknown'; const ratio=h.maxHp?Math.max(0,h.currentHp/h.maxHp):0; const c=h.dead?'dead':h.currentHp<=0&&h.nonlethalDefeat?'incapacitated':ratio>=1?'healthy':ratio>=.76?'bruised':ratio>=.51?'wounded':ratio>=.26?'badly wounded':'critical';return c;}

@@ -1,89 +1,71 @@
 # Porting notes: SillyTavern Story Engine → Lumiverse
 
-## Replaced host dependencies
+## Host integration replacements
 
 | Original concern | Native Lumiverse design |
 |---|---|
 | SillyTavern `generate_interceptor` / global context | `spindle.registerInterceptor()` |
-| ST secondary generation helpers | `spindle.generate.quiet()` |
-| ST connection profile adapter | Lumiverse connection IDs on generation requests |
-| chat metadata + DOM-coupled state | persisted `spindle.variables.chat` JSON state |
-| ST persona read/write | `spindle.personas.getActive/update/create/switchActive` |
-| DOM observers over `.mes` / `#chat` | generation/message lifecycle events |
-| Regex module used to hide streaming artifacts | no artifact emission; direct structured sidecar calls |
-| post-generation message edits via ST internals | `spindle.chat.updateMessage()` |
-| injected settings HTML in ST panel | native drawer tab + float widget + input-bar action |
+| ST secondary generation helpers | centralized Spindle direct sidecar generation |
+| ST connection profile adapter | Lumiverse Connection profile IDs, resolved per user |
+| chat metadata + DOM-coupled state | versioned `spindle.variables.chat` state |
+| ST persona read/write | Lumiverse Personas API |
+| DOM observers over `.mes` / `#chat` | backend/frontend lifecycle events plus explicit active-chat hints |
+| Regex used to hide streaming tracker artifacts | sidecar structured output never enters narration |
+| post-generation message edits via ST internals | Lumiverse chat mutation |
+| injected settings HTML | native drawer, input-bar action and floating widget |
 
 ## Structural improvements
 
-### 1. Transactional turns
-Preflight computes a `TurnResolution` but does not commit HP/XP/relationships immediately. The finalizer commits only after Lumiverse reports a successfully saved generation.
+### Transactional turns and swipe stability
+Preflight computes a `TurnResolution` without committing HP/XP/relationships. Final state commits only after a saved generation. Swipe/regenerate restores the pre-turn core snapshot and reapplies the same resolution, preventing duplicate damage, XP, spending, relationship growth, random events, names and loot.
 
-### 2. Swipe/regenerate stability
-The state stores a pre-turn core snapshot. A swipe/regeneration restores it, reapplies the already-rolled result, then archives the new final narration. This prevents repeated damage, XP, spending, relationship growth, random-event rerolls, or loot rerolls.
+### Operator-scoped user isolation
+Settings live in user-scoped storage. Chat/persona/connection resolution is tied to the frontend/event user. Direct sidecar generation is centralized through one compatibility wrapper that carries the operator user scope in the request and callback path; this specifically addresses real Lumiverse runtimes that reject unscoped `generate.quiet()` with `userId is required for operator-scoped extensions`.
 
-### 3. Deterministic local names
-Name generation no longer needs another model call. A seeded style generator reserves unique names per chat. The narrator receives candidates and a reveal gate.
+### Silent attachment
+There is no synthetic “Start Adventure” message. The extension attaches to the active chat, imports existing history when requested/allowed, and starts mechanics on the next real user turn. Active-chat resolution combines operator-scoped backend lookup, frontend `activeChatId` hints and lifecycle event caches.
 
-### 4. Host-independent core
-All simulation code is in `src/core`. It has no `spindle`, DOM, or UI imports. Host I/O stays in two entrypoints.
+### Existing-chat bootstrap
+Canonical saved history is chunked through a History Import Assistant and reconstructed into the same validated mutation layer used by OOC commands. It can recover established player/NPC resources, arbitrary positive/negative/mixed relationships, scene presence, world facts and continuity without replaying past mechanics as new turns.
 
-### 5. Explicit state version
-The JSON root carries a state version and is normalized on every load. Corrupt/missing fields fall back conservatively instead of crashing the generation interceptor.
+### OOC administrative commands
+Double-parenthesis clauses are isolated from IC text. A dedicated Command Assistant may retcon story/mechanical namespaces through structured operations while internal pending/rollback/audit transaction machinery remains protected.
 
-### 6. Graceful sidecar failure
-If semantic generation fails, a conservative local fallback only recognizes obvious attack/social/stealth patterns; it never blocks the user's main generation.
+### Host-independent core
+Simulation code lives under `src/core` and does not depend on Lumiverse globals/DOM. Backend and frontend entrypoints own host I/O.
 
-### 7. Native Prompt Breakdown
-The scene-resolution handoff is attributed as `Story Engine · Scene Resolution`, so the user can inspect exactly what the extension injected.
+### Explicit state migration
+The current root schema is **v10**. Older v9/v8/v7/v6 states are normalized/migrated conservatively rather than discarded.
 
-### 8. Prose Guard without regex artifacts
-The model never emits hidden tracker JSON into the primary reply. Review/repair runs after generation and edits the saved message only when appropriate.
+### Deterministic local names
+Name generation is seeded locally and reserves names per chat. No separate naming model call is needed.
 
+### Native Prompt Breakdown
+The narrator handoff is attributed as `Story Engine · Scene Resolution` rather than hidden in a host-specific prompt injection layer.
 
-### 9. Relationship anti-farming and explicit boundaries
-Repeated use of the same social tactic toward the same goal does not accumulate Bond indefinitely. Personal-boundary pressure is persisted separately, and romance/intimacy progression is a typed state rather than narrator-only implication.
+### Prose Guard without hidden artifacts
+Repair is sentence-local and validated. Only offending sentences may change; unaffected narration remains untouched. Structured repair output never streams into the primary reply.
 
-### 10. Reputation has deterministic reach
-Fame/infamy/fear stays location-scoped. Once notable, it can bias a newly established local NPC's initial Bond/Fear/Hostility while still allowing scene-specific context to dominate.
+### Relationship depth ported from upstream
+The port now includes rapport 0–5, cooldowns, slow B3→B4 evidence categories/blockers, standing influence (`none/aware/constrained`), romance initiative style (`auto/nervous/flirt`), arbitrary starting relationship semantics and explicit boundary state.
 
-### 11. Configurable mechanics, not controller constants
-HP bands, damage/healing steps, rank ranges, economy tiers, equipment defense bonuses, event chance and progression limits live in small core modules and are covered by tests rather than being embedded across host/UI code.
+### Tracker depth ported from upstream
+Player wounds/conditions/tasks/commitments and NPC aliases/inventory/currency/gear/wounds/conditions are first-class state. Durable personality is separate from temporary mood. Name promotions propagate through linked systems.
 
-### 12. Deterministic NPC identity and corpse-search idempotency
-New NPCs resolve a stable rank from the upstream-style capability pool distribution and keep it thereafter. Deterministic corpse loot requires a tracked verified-dead target and is permanently marked searched after commit.
+### Hidden health details ported from upstream
+Condition-based healing DCs, once-per-damage-state natural treatment, companion HP floor, hidden impairment, safe-scene recovery and contextual injury severity ceilings are deterministic rather than narrator-owned.
 
-### 13. Hidden continuity ledgers are first-class state
-User knowledge, latent favors/grievances, descriptive archive, rapport clocks, bound companion, pending boundaries and world arcs are typed/versioned instead of being folded into freeform NPC notes.
+### World memory depth ported from upstream
+The descriptive archive stores identity/affiliation/history/connections/status/location. World plans distinguish scheduled/NPC/faction/power-actor actors and can expose evidence through location/actor/news/investigation routes. Grounding checks prevent post-turn assistants from fabricating unsupported archive/plan changes.
 
-### 14. OOC administrative commands
-Double-parenthesis clauses are isolated from IC text, resolved by a dedicated Command Assistant, and applied through a validated generic story-state mutation layer. The assistant can retcon all story/mechanics namespaces while engine bookkeeping remains protected.
+### Connection fallback is profile-based
+A saved role-specific profile is preferred, then semantic inheritance/runtime profile, then the user’s usable default, then another usable profile with an API key. Features that genuinely require a sidecar fail with a Story Engine-specific error rather than launching an undefined host generation.
 
-### 15. Existing-chat bootstrap and arbitrary starting relationships
-The extension can attach to an already-running chat by reading the canonical stored history and reconstructing state. NPCs can begin with any established positive, negative, mixed, familial, romantic, professional, hierarchical or setting-specific relationship; freeform relationship descriptors preserve semantics beyond Bond/Fear/Hostility.
+## Deliberate differences from upstream
 
-## Deliberate implementation differences
-
-- The original project has a very large, organically-grown semantic prompt surface with numerous micro-rules. This port preserves the systems and key mechanical contracts but rewrites the semantic contract into a typed compact ledger rather than copying the upstream prompt text.
-- The port uses seeded RNG keyed to chat/turn/fingerprint for stable replay. This is intentionally more reproducible than unseeded `Math.random()` on regeneration.
-- UI is redesigned around Lumiverse's drawer and widget system rather than reproducing SillyTavern markup.
-
-### 17. Silent attachment and scene-aware HUD
-There is no synthetic “Start Adventure” chat message. The extension attaches on frontend load/chat switch, bootstraps existing history when enabled, and begins on the next real user turn. The floating HUD exposes player resources plus an explicit current-scene NPC presence list; presence is separate from the historical tracker so off-screen NPCs remain tracked without appearing as present.
-
-### 18. Connection fallback is profile-based
-An empty selector no longer means “hope the host has a current connection”. Sidecar roles resolve the requested profile, then semantic inheritance, then the user default usable profile, then any usable profile with an API key.
-
-
-### 19. Active-chat events are not conflated
-`CHAT_SWITCHED` is the only event that changes the cached active chat. `CHAT_CHANGED` merely refreshes state when the changed chat is already active, preventing background mutations from silently redirecting Story Engine to another conversation.
-
-### 20. Unknown presence never clears known presence
-Current-scene NPC presence is a complete list when the semantic/post-turn assistant actually supplies it. Conservative/local semantic fallback leaves presence unspecified instead of treating “unknown” as an empty room; v7 states also recover NPCs seen on the current turn during migration.
-
-### 17. Redundant active-chat resolution
-Manual UI actions no longer rely on a single backend lookup. Operator-scoped `spindle.chats.getActive(userId)` is authoritative; the frontend independently reads Lumiverse's persisted `activeChatId` setting and forwards chat IDs seen in `CHAT_SWITCHED`, message-render, message-sent, generation, and settings events. A transient null lookup never erases a valid cached hint.
-
-### 18. Operator-scoped user-context preservation
-History import and all LLM sidecars retain the originating Lumiverse user scope. Automatic history bootstrap is frontend-initiated rather than fire-and-forget from a backend dashboard/event callback, so long-running imports cannot outlive and lose the operator user context. Generation lifecycle events also refresh the chat→user mapping before finalization.
-
+- Starting stat budget is **15**, not 24, by project decision.
+- The port uses seeded RNG keyed to chat/turn/fingerprint for stable replay.
+- B/F/H remains 0–4 in this save schema while upstream relationship threshold behavior is mapped into it.
+- UI is redesigned around Lumiverse rather than reproducing SillyTavern markup.
+- The original synthetic adventure-opening message flow is replaced by silent chat attachment. This avoids injecting text the user did not write and avoids depending on the host’s current narrator connection just to initialize Story Engine.
+- The original project has a very large organically-grown semantic prompt surface. This port reproduces its mechanical/continuity contracts as typed compact ledgers rather than copying the prompt text line-for-line.
