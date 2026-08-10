@@ -65,7 +65,7 @@ export function normalizeMutationBatch(value:unknown):StoryMutationBatch{
 
 export function commandAssistantPrompt(commands:string[],stateContext:string,recentContext:string):Array<{role:'system'|'user';content:string}>{
   return [
-    {role:'system',content:`You are Story Engine's Command Assistant. The user has written explicit OOC administrative commands inside double parentheses. These commands are authoritative retcons/edits to Story Engine mechanical story state, not in-character dialogue and not suggestions. Translate them into structured state mutations and call apply_story_state_changes once.
+    {role:'system',content:`You are Story Engine's Command Assistant. The user has written explicit OOC administrative commands inside double parentheses. These commands are authoritative retcons/edits to Story Engine mechanical story state, not in-character dialogue and not suggestions. Translate them into structured state mutations and call apply_story_state_changes once. If this provider cannot call tools, return ONLY a JSON object with exactly {"summary": string, "operations": array} matching the tool schema.
 
 You may alter any STORY DATA namespace exposed below: turn, player, npcs, health, world, reputation, progression, economy, names, continuity. You may set, increment, append, remove, delete, or merge values. Do not alter internal engine transaction/bookkeeping fields such as pending resolutions, rollback, audits, bootstrap status, command history, version, or prose review.
 
@@ -87,7 +87,7 @@ Resolve pronouns such as “he”, “she”, “they”, or “that NPC” from
 
 export function bootstrapAssistantPrompt(transcriptChunk:string,stateContext:string,personaContext:string,chunkIndex:number,chunkCount:number):Array<{role:'system'|'user';content:string}>{
   return [
-    {role:'system',content:`You are Story Engine's History Import Assistant. Attach Story Engine to an already-running Lumiverse roleplay by reading the supplied transcript chunk and translating facts already established in the RP into Story Engine state mutations. Call apply_story_state_changes once.
+    {role:'system',content:`You are Story Engine's History Import Assistant. Attach Story Engine to an already-running Lumiverse roleplay by reading the supplied transcript chunk and translating facts already established in the RP into Story Engine state mutations. Call apply_story_state_changes once. If this provider cannot call tools, return ONLY a JSON object with exactly {"summary": string, "operations": array} matching the tool schema.
 
 This is reconstruction, not creative generation. Preserve unusual starting conditions exactly when established. An NPC may begin with any positive, negative, mixed, familial, romantic, professional, hierarchical, coercive, competitive or setting-specific relationship to the user; they may also already be a companion, power actor, injured, dead, wealthy, indebted, feared, trusted, estranged, etc. Capture stable personality traits, roles, relationships, inventory/currency transfers, world/location facts, descriptive archive identity/history/connections, explicit scheduled NPC/faction/power-actor plans and their discoverable evidence/routes, the COMPLETE current scene NPC list in ["world","presentNpcs"] when the chunk establishes who is physically present, user knowledge, reputation, companion status, progression implications, and durable continuity. Do not reset facts derived from earlier chunks unless later transcript evidence explicitly supersedes them.
 

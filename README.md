@@ -2,7 +2,7 @@
 
 A clean-room, native **Lumiverse / Spindle** reimplementation of the behavior and feature set of ZDOSt's SillyTavern Story Engine.
 
-This is not a compatibility shim and does not load SillyTavern APIs. It is split into a backend simulation pipeline and a frontend Lumiverse UI. Current release: **0.2.6**.
+This is not a compatibility shim and does not load SillyTavern APIs. It is split into a backend simulation pipeline and a frontend Lumiverse UI. Current release: **0.2.9**.
 
 ## What is included
 
@@ -30,7 +30,7 @@ This is not a compatibility shim and does not load SillyTavern APIs. It is split
 - post-narration continuity archivist, user-knowledge ledger, descriptive archive, latent favors/grievances, rapport clocks, bound companion, pending boundaries and world arcs;
 - Prose Guard in Off / Review / Automatic modes;
 - direct message repair through Lumiverse `chat_mutation` (no regex extension dependency);
-- floating player HUD (resources, objectives and NPCs present), drawer UI, settings, tracker and turn audit;
+- floating player HUD (resources, objectives and NPCs present) with user-adjustable background opacity, drawer UI, settings, tracker and turn audit;
 - pre-turn rollback snapshots so regenerate/swipe reuses the same mechanics without duplicating XP, damage, money, or relationships.
 
 ## Architecture
@@ -97,10 +97,12 @@ If the HUD says **No active chat** while a chat is visibly open, refresh the Sto
 1. Open a chat.
 2. Open **Story Engine** from the drawer or input-bar Extras menu.
 3. In **Character**, create or convert the active persona. PHY + MND + CHA must total 15.
-4. In **Settings**, choose any of your Lumiverse Connection profiles independently for Semantic, Persona Conversion, OOC Commands, History Import, and Prose Guard. Leaving a selector empty inherits the semantic selection where applicable, then falls back to the user’s usable default Connection profile (or another usable profile with an API key); it does not depend on an implicit host “current connection”.
+4. In **Settings**, choose any of your Lumiverse Connection profiles independently for Semantic, Persona Conversion, OOC Commands, History Import, and Prose Guard. The Floating HUD section also exposes a persistent background-opacity slider (40–100%, default 95%) so the widget can be made fully solid without fading its text/content. Leaving a selector empty inherits the semantic selection where applicable, then falls back to the user’s usable default Connection profile (or another usable profile with an API key); it does not depend on an implicit host “current connection”.
 5. Keep Prose Guard on **Review** first. Once you like its behavior, switch to Automatic if desired.
 6. Roleplay normally. Any `((double-parenthesis))` clauses are treated as OOC administrative commands, applied to Story Engine state, and removed from the IC prompt. Mechanical information is available in Tracker/Audit, but the narrator only receives a prose-safe outcome handoff.
 7. If the chat already contained messages before Story Engine was enabled, the extension can import the full saved history automatically or through **Import existing history now** and reconstruct established NPCs, relationships, inventory, world state, and continuity.
+
+History import is observable and recoverable: the UI reports the current stage/chunk, polls while work is active, exposes **Cancel import**, and persists a heartbeat. Each model chunk has a bounded timeout; a stale/orphaned `importing` state left by an update/restart is converted to a retryable failure instead of leaving the panel stuck forever. When a concrete Connection profile is selected/resolved, assistant calls use direct `raw()` generation with that profile and fall back to strict JSON if the provider does not support tool calls.
 
 For a subsystem-by-subsystem map against the upstream extension, see `PARITY_MATRIX.md`.
 
@@ -108,15 +110,15 @@ For a subsystem-by-subsystem map against the upstream extension, see `PARITY_MAT
 
 The extension treats operator scope as a first-class runtime mode. Settings, active chat/persona resolution, connection profiles, and every sidecar assistant are scoped to the originating Lumiverse user. Direct generation goes through one compatibility wrapper that carries the user scope in the generation request and callback path, including runtimes that reject unscoped sidecars with `userId is required for operator-scoped extensions`.
 
-## Upstream-parity additions in v0.2.6
+## Upstream-parity and runtime-hardening additions through v0.2.9
 
-The upstream source was re-audited rather than relying only on its README. This release adds several contracts that were still simplified in earlier Lumiverse builds: exactly-one starting ability and the MND 7 spell gate, richer persona preservation, rapport/slow B3→B4 relationship growth, standing influence and romance initiative style, persistent player tasks/commitments/wounds/status, NPC possessions and conditions, healing difficulty/treatment locking, contextual injury ceilings, richer descriptive/world-plan memory with discoverable evidence routes, and established/unknown world-state flags so default clock/weather values are not mistaken for observed facts.
+The upstream source was re-audited rather than relying only on its README. Recent releases add several contracts that were still simplified in earlier Lumiverse builds: exactly-one starting special ability, an optional starting spell/power with **no stat gate** by project decision, richer persona preservation, rapport/slow B3→B4 relationship growth, standing influence and romance initiative style, persistent player tasks/commitments/wounds/status, NPC possessions and conditions, healing difficulty/treatment locking, contextual injury ceilings, richer descriptive/world-plan memory with discoverable evidence routes, and established/unknown world-state flags so default clock/weather values are not mistaken for observed facts.
 
 The one intentional balance divergence is the **15-point starting stat budget** requested for this port; upstream currently uses 24. See `PARITY_MATRIX.md` for the subsystem map.
 
 ## Compatibility note
 
-The implementation is designed against the Lumiverse Spindle APIs documented in August 2026: native prompt interceptors, direct quiet generation, persisted chat variables, personas, chat mutation, backend events, drawer tabs and float widgets. It deliberately does **not** depend on SillyTavern globals, `.mes` DOM selectors, `generate_interceptor`, connection-profile DOM state, or the SillyTavern Regex extension.
+The implementation is designed against the Lumiverse Spindle APIs documented in August 2026: native prompt interceptors, direct raw/quiet generation, persisted chat variables, personas, chat mutation, backend events, drawer tabs and float widgets. It deliberately does **not** depend on SillyTavern globals, `.mes` DOM selectors, `generate_interceptor`, connection-profile DOM state, or the SillyTavern Regex extension.
 
 ## Credits / provenance
 

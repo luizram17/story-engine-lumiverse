@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { combatOutcome, nonHostileOutcome, resolveTurn, resolveProactivity } from '../dist/core/mechanics.js';
-import { createDefaultState, normalizeState, ensureNpc, rankFromCapabilityPool, makeCoreSnapshot, restoreCoreSnapshot } from '../dist/core/state.js';
+import { createDefaultState, normalizeState, normalizeSettings, ensureNpc, rankFromCapabilityPool, makeCoreSnapshot, restoreCoreSnapshot } from '../dist/core/state.js';
 import { conditionFromActor, applyDamage, applyHeal, safeSceneHealing, healingDcForCondition } from '../dist/core/health.js';
 import { deterministicLoot, addCurrency, resolvePlayerEquipmentDefense } from '../dist/core/economy.js';
 import { applyProseRepairPayload, buildProseRepairCases, collectProseFindings } from '../dist/core/prose.js';
@@ -22,6 +22,11 @@ assert.equal(combatOutcome(-5,3).counterPotential,'medium');
 assert.equal(combatOutcome(-8,3).counterPotential,'severe');
 assert.equal(nonHostileOutcome(1).outcomeTier,'Success');
 assert.equal(nonHostileOutcome(-1).outcomeTier,'Failure');
+
+// Floating HUD opacity is persisted and normalized without fading the HUD contents themselves.
+assert.equal(normalizeSettings({}).trackerWidgetBackgroundOpacity,0.95);
+assert.equal(normalizeSettings({trackerWidgetBackgroundOpacity:1}).trackerWidgetBackgroundOpacity,1);
+assert.equal(normalizeSettings({trackerWidgetBackgroundOpacity:0.1}).trackerWidgetBackgroundOpacity,0.4);
 
 
 // Scene presence is explicit when known and conservative when semantic fallback cannot establish it.
@@ -49,7 +54,7 @@ assert.equal(establishedWorld.world.reputationLocation,'Emberfall');assert.equal
 // Rich world memory keeps routed evidence private until the relevant route is open.
 const routedWorld=createDefaultState();routedWorld.world.location='Old Harbor';routedWorld.world.presentNpcs=['Mira'];routedWorld.world.plans.push({id:'plan-test',actor:'Guild',intent:'recover the stolen ledger',kind:'faction',cause:'The ledger was stolen.',consequences:['send an investigator'],evidence:[{id:'ev-location',topic:'boot prints',text:'Fresh boot prints lead toward the warehouse.',route:'location',location:'Old Harbor',discovered:false},{id:'ev-actor',topic:'Mira knows',text:'Mira has seen the guild seal.',route:'actor',actor:'Mira',discovered:false}],createdTurn:0,updatedTurn:0,dueTurn:1,status:'due'});
 const openEvidence=observablePlanEvidence(routedWorld);assert.equal(openEvidence.length,2);
-const migratedWorld=normalizeState({...routedWorld,version:9,continuity:{...routedWorld.continuity,descriptiveArchive:[{id:'archive-1',label:'Guild Hall',kind:'location',description:'A fortified counting house.',history:['Raided last winter'],connections:['Merchants'],evidence:['The guild crest hangs above the door.'],firstSeenTurn:1,lastSeenTurn:2}]}});assert.equal(migratedWorld.version,10);assert.equal(migratedWorld.continuity.descriptiveArchive[0]?.history[0],'Raided last winter');assert.equal(migratedWorld.world.plans[0]?.evidence?.[0]?.route,'location');
+const migratedWorld=normalizeState({...routedWorld,version:9,continuity:{...routedWorld.continuity,descriptiveArchive:[{id:'archive-1',label:'Guild Hall',kind:'location',description:'A fortified counting house.',history:['Raided last winter'],connections:['Merchants'],evidence:['The guild crest hangs above the door.'],firstSeenTurn:1,lastSeenTurn:2}]}});assert.equal(migratedWorld.version,11);assert.equal(migratedWorld.continuity.descriptiveArchive[0]?.history[0],'Raided last winter');assert.equal(migratedWorld.world.plans[0]?.evidence?.[0]?.route,'location');
 
 
 // Starting character point-buy is exactly 15, with 1-9 per stat.

@@ -26,7 +26,7 @@ Settings live in user-scoped storage. Chat/persona/connection resolution is tied
 There is no synthetic “Start Adventure” message. The extension attaches to the active chat, imports existing history when requested/allowed, and starts mechanics on the next real user turn. Active-chat resolution combines operator-scoped backend lookup, frontend `activeChatId` hints and lifecycle event caches.
 
 ### Existing-chat bootstrap
-Canonical saved history is chunked through a History Import Assistant and reconstructed into the same validated mutation layer used by OOC commands. It can recover established player/NPC resources, arbitrary positive/negative/mixed relationships, scene presence, world facts and continuity without replaying past mechanics as new turns.
+Canonical saved history is chunked through a History Import Assistant and reconstructed into the same validated mutation layer used by OOC commands. It can recover established player/NPC resources, arbitrary positive/negative/mixed relationships, scene presence, world facts and continuity without replaying past mechanics as new turns. Import progress is persisted by stage/chunk with a heartbeat; each assistant chunk has an abortable timeout, the user can cancel, and stale/orphaned imports become retryable failures after worker restarts instead of remaining permanently `importing`. With an explicit connection profile, the importer uses direct `generate.raw()` and can fall back from tool calling to strict JSON output.
 
 ### OOC administrative commands
 Double-parenthesis clauses are isolated from IC text. A dedicated Command Assistant may retcon story/mechanical namespaces through structured operations while internal pending/rollback/audit transaction machinery remains protected.
@@ -35,7 +35,7 @@ Double-parenthesis clauses are isolated from IC text. A dedicated Command Assist
 Simulation code lives under `src/core` and does not depend on Lumiverse globals/DOM. Backend and frontend entrypoints own host I/O.
 
 ### Explicit state migration
-The current root schema is **v10**. Older v9/v8/v7/v6 states are normalized/migrated conservatively rather than discarded.
+The current root schema is **v11**. Older v10/v9/v8/v7/v6 states are normalized/migrated conservatively rather than discarded.
 
 ### Deterministic local names
 Name generation is seeded locally and reserves names per chat. No separate naming model call is needed.

@@ -9,6 +9,7 @@ export function setup(ctx) {
     let chatHint = '';
     let personaHint = '';
     const autoImportAttempted = new Set();
+    let bootstrapPollTimer = null;
     const removeStyle = ctx.dom.addStyle(`
     .se-shell{padding:12px 12px 28px;display:flex;flex-direction:column;gap:12px;color:var(--lumiverse-text);font-size:13px}
     .se-hero{padding:14px;border:1px solid var(--lumiverse-border);background:var(--lumiverse-fill-subtle);border-radius:12px}
@@ -20,7 +21,7 @@ export function setup(ctx) {
     .se-btn{border:1px solid var(--lumiverse-border);background:var(--lumiverse-fill-subtle);color:var(--lumiverse-text);border-radius:8px;padding:7px 10px;cursor:pointer;font:inherit}.se-btn:hover{filter:brightness(1.08)}.se-btn.primary{background:var(--lumiverse-primary);color:var(--lumiverse-primary-contrast,#fff);border-color:transparent}.se-btn.danger{color:var(--lumiverse-danger,#e66)}.se-btn:disabled{opacity:.55;cursor:default}
     .se-kpi{padding:9px;border:1px solid var(--lumiverse-border);border-radius:9px;background:var(--lumiverse-fill-subtle)}.se-kpi b{display:block;font-size:15px}.se-list{display:flex;flex-direction:column;gap:6px}.se-card{padding:9px;border:1px solid var(--lumiverse-border);border-radius:9px}.se-chip{display:inline-flex;padding:2px 6px;border-radius:999px;background:var(--lumiverse-fill-subtle);border:1px solid var(--lumiverse-border);font-size:10px;margin:2px}.se-code{font-family:ui-monospace,monospace;font-size:10px;white-space:pre-wrap;max-height:260px;overflow:auto;background:var(--lumiverse-fill-subtle);padding:8px;border-radius:8px}
     .se-toggle{display:flex;gap:8px;align-items:flex-start}.se-toggle input{margin-top:2px}.se-pointbuy{padding:8px 10px;border:1px solid var(--lumiverse-border);border-radius:8px;font-weight:650}.se-pointbuy.is-ok{border-color:var(--lumiverse-success,#5bba7a)}.se-pointbuy.is-bad{border-color:var(--lumiverse-danger,#e66);color:var(--lumiverse-danger,#e66)}.se-warn{padding:9px;border:1px solid color-mix(in srgb,var(--lumiverse-warning,#d9a441) 45%,transparent);border-radius:8px;background:color-mix(in srgb,var(--lumiverse-warning,#d9a441) 10%,transparent)}
-    .se-widget-panel{width:100%;height:100%;box-sizing:border-box;border:1px solid var(--lumiverse-border);border-radius:12px;background:var(--lumiverse-fill);color:var(--lumiverse-text);box-shadow:0 8px 28px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:11px}.se-widget-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-bottom:1px solid var(--lumiverse-border);background:var(--lumiverse-fill-subtle)}.se-widget-title{min-width:0}.se-widget-title b{display:block;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.se-widget-open{border:1px solid var(--lumiverse-border);border-radius:7px;background:var(--lumiverse-fill);color:var(--lumiverse-text);padding:5px 7px;cursor:pointer;font:inherit;flex:none}.se-widget-scroll{min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:7px}.se-widget-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}.se-widget-kpi,.se-widget-section{border:1px solid var(--lumiverse-border);border-radius:8px;background:var(--lumiverse-fill-subtle);padding:7px}.se-widget-kpi span,.se-widget-label{display:block;color:var(--lumiverse-text-muted);font-size:9px;text-transform:uppercase;letter-spacing:.05em}.se-widget-kpi b{display:block;font-size:13px;margin-top:2px}.se-widget-line{line-height:1.45;overflow-wrap:anywhere}.se-widget-chips{display:flex;flex-wrap:wrap;gap:3px;margin-top:4px}.se-widget-chip{border:1px solid var(--lumiverse-border);border-radius:999px;padding:2px 5px;background:var(--lumiverse-fill);font-size:9px;line-height:1.2}.se-widget-empty{color:var(--lumiverse-text-muted);font-style:italic}.se-widget-bad{color:var(--lumiverse-danger,#e66)}
+    .se-widget-panel{width:100%;height:100%;box-sizing:border-box;border:1px solid var(--lumiverse-border);border-radius:12px;background:transparent;color:var(--lumiverse-text);box-shadow:0 8px 28px rgba(0,0,0,.28);display:flex;flex-direction:column;overflow:hidden;font-size:11px;position:relative;isolation:isolate;--se-widget-bg-opacity:.95}.se-widget-panel::before{content:"";position:absolute;inset:0;border-radius:inherit;background:var(--lumiverse-bg);opacity:var(--se-widget-bg-opacity,.95);pointer-events:none;z-index:0}.se-widget-panel>*{position:relative;z-index:1}.se-widget-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-bottom:1px solid var(--lumiverse-border);background:var(--lumiverse-fill-subtle)}.se-widget-title{min-width:0}.se-widget-title b{display:block;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.se-widget-open{border:1px solid var(--lumiverse-border);border-radius:7px;background:var(--lumiverse-fill);color:var(--lumiverse-text);padding:5px 7px;cursor:pointer;font:inherit;flex:none}.se-widget-scroll{min-height:0;overflow:auto;padding:8px;display:flex;flex-direction:column;gap:7px}.se-widget-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}.se-widget-kpi,.se-widget-section{border:1px solid var(--lumiverse-border);border-radius:8px;background:var(--lumiverse-fill-subtle);padding:7px}.se-widget-kpi span,.se-widget-label{display:block;color:var(--lumiverse-text-muted);font-size:9px;text-transform:uppercase;letter-spacing:.05em}.se-widget-kpi b{display:block;font-size:13px;margin-top:2px}.se-widget-line{line-height:1.45;overflow-wrap:anywhere}.se-widget-chips{display:flex;flex-wrap:wrap;gap:3px;margin-top:4px}.se-widget-chip{border:1px solid var(--lumiverse-border);border-radius:999px;padding:2px 5px;background:var(--lumiverse-fill);font-size:9px;line-height:1.2}.se-widget-empty{color:var(--lumiverse-text-muted);font-style:italic}.se-widget-bad{color:var(--lumiverse-danger,#e66)}
     @media(max-width:540px){.se-grid,.se-grid-3{grid-template-columns:1fr}.se-shell{padding:9px 8px 24px}}
   `);
     const tab = ctx.ui.registerDrawerTab({ id: 'story-engine', title: 'Story Engine', shortName: 'Story', description: 'Simulation, tracker, player sheet and prose guard', keywords: ['roleplay', 'tracker', 'dice', 'world', 'progression'], headerTitle: 'Story Engine', iconSvg });
@@ -105,6 +106,16 @@ export function setup(ctx) {
         ctx.sendToBackend({ type, ...extra, chatId, personaId });
     }
     function setBusy(value) { busy = value; render(); }
+    function scheduleBootstrapPoll() {
+        if (bootstrapPollTimer)
+            clearTimeout(bootstrapPollTimer);
+        const importing = busy === 'history' || String(dashboard?.state?.bootstrap?.status || '') === 'importing';
+        if (!importing) {
+            bootstrapPollTimer = null;
+            return;
+        }
+        bootstrapPollTimer = setTimeout(() => { bootstrapPollTimer = null; void request('get_dashboard'); }, 3000);
+    }
     function render() {
         const root = tab.root;
         root.replaceChildren();
@@ -138,14 +149,17 @@ export function setup(ctx) {
         wire(shell);
         updateWidget();
     }
+    function applyWidgetOpacity(value) { if (!widget?.root)
+        return; widget.root.style.setProperty('--se-widget-bg-opacity', String(normalizeWidgetOpacity(value))); }
     function wire(shell) {
         shell.querySelectorAll('[data-view]').forEach(el => el.addEventListener('click', () => { activeView = el.dataset.view || 'overview'; render(); }));
         shell.querySelector('[data-refresh]')?.addEventListener('click', () => request('get_dashboard'));
-        shell.querySelector('[data-import-history]')?.addEventListener('click', () => { setBusy('history'); request('import_existing_history'); });
+        shell.querySelector('[data-import-history]')?.addEventListener('click', () => { setBusy('history'); request('import_existing_history'); scheduleBootstrapPoll(); });
+        shell.querySelector('[data-cancel-history]')?.addEventListener('click', () => request('cancel_history_import'));
         shell.querySelector('[data-convert-persona]')?.addEventListener('click', () => { setBusy('persona'); request('convert_active_persona'); });
         shell.querySelector('[data-reset]')?.addEventListener('click', async () => { const ok = await ctx.ui.showConfirm({ title: 'Reset Story Engine state?', message: 'This clears tracker, world memory, hidden health, progression and Story Engine player data for the current chat.', variant: 'danger', confirmLabel: 'Reset' }); if (ok?.confirmed === true)
             request('reset_chat_state'); });
-        shell.querySelector('[data-save-settings]')?.addEventListener('click', () => { const form = shell.querySelector('#se-settings'); const fd = new FormData(form); request('save_settings', { settings: { enabled: fd.get('enabled') === 'on', semanticEnabled: fd.get('semanticEnabled') === 'on', semanticConnectionId: String(fd.get('semanticConnectionId') || ''), personaConnectionId: String(fd.get('personaConnectionId') || ''), commandConnectionId: String(fd.get('commandConnectionId') || ''), bootstrapConnectionId: String(fd.get('bootstrapConnectionId') || ''), semanticTemperature: Number(fd.get('semanticTemperature') || .1), recentMessageCount: Number(fd.get('recentMessageCount') || 18), proseGuardMode: String(fd.get('proseGuardMode') || 'review'), proseGuardConnectionId: String(fd.get('proseGuardConnectionId') || ''), proseGuardExtraPhrases: String(fd.get('proseGuardExtraPhrases') || '').split(/\n|,/).map(x => x.trim()).filter(Boolean), randomEvents: fd.get('randomEvents') === 'on', randomEventChance: Number(fd.get('randomEventChance') || .08), proactivity: fd.get('proactivity') === 'on', powerActors: fd.get('powerActors') === 'on', progression: fd.get('progression') === 'on', trackerPostPass: fd.get('trackerPostPass') === 'on', showTrackerWidget: fd.get('showTrackerWidget') === 'on', oocCommandsEnabled: fd.get('oocCommandsEnabled') === 'on', autoBootstrapExistingChat: fd.get('autoBootstrapExistingChat') === 'on', nameStyle: String(fd.get('nameStyle') || 'Balanced Fantasy'), debug: fd.get('debug') === 'on' } }); });
+        shell.querySelector('[data-save-settings]')?.addEventListener('click', () => { const form = shell.querySelector('#se-settings'); const fd = new FormData(form); request('save_settings', { settings: { enabled: fd.get('enabled') === 'on', semanticEnabled: fd.get('semanticEnabled') === 'on', semanticConnectionId: String(fd.get('semanticConnectionId') || ''), personaConnectionId: String(fd.get('personaConnectionId') || ''), commandConnectionId: String(fd.get('commandConnectionId') || ''), bootstrapConnectionId: String(fd.get('bootstrapConnectionId') || ''), semanticTemperature: Number(fd.get('semanticTemperature') || .1), recentMessageCount: Number(fd.get('recentMessageCount') || 18), proseGuardMode: String(fd.get('proseGuardMode') || 'review'), proseGuardConnectionId: String(fd.get('proseGuardConnectionId') || ''), proseGuardExtraPhrases: String(fd.get('proseGuardExtraPhrases') || '').split(/\n|,/).map(x => x.trim()).filter(Boolean), randomEvents: fd.get('randomEvents') === 'on', randomEventChance: Number(fd.get('randomEventChance') || .08), proactivity: fd.get('proactivity') === 'on', powerActors: fd.get('powerActors') === 'on', progression: fd.get('progression') === 'on', trackerPostPass: fd.get('trackerPostPass') === 'on', showTrackerWidget: fd.get('showTrackerWidget') === 'on', trackerWidgetBackgroundOpacity: Number(fd.get('trackerWidgetBackgroundOpacity') || .95), oocCommandsEnabled: fd.get('oocCommandsEnabled') === 'on', autoBootstrapExistingChat: fd.get('autoBootstrapExistingChat') === 'on', nameStyle: String(fd.get('nameStyle') || 'Balanced Fantasy'), debug: fd.get('debug') === 'on' } }); });
         const updatePointBuy = () => { const f = shell.querySelector('#se-character'); if (!f)
             return; const stats = ['PHY', 'MND', 'CHA'].map(k => Number(f.elements.namedItem(k)?.value || 0)); const total = stats.reduce((a, b) => a + b, 0); const valid = stats.every(v => Number.isInteger(v) && v >= 1 && v <= 9) && total === 15; const info = shell.querySelector('[data-pointbuy]'); if (info) {
             info.textContent = valid ? '15 / 15 points · ready' : `${total} / 15 points · ${total < 15 ? 15 - total + ' remaining' : total > 15 ? total - 15 + ' over budget' : 'invalid'}`;
@@ -162,12 +176,17 @@ export function setup(ctx) {
         shell.querySelector('[data-claim]')?.addEventListener('click', () => { const f = shell.querySelector('#se-progression'); const fd = new FormData(f); request('claim_milestone', { stat: String(fd.get('stat') || ''), ability: String(fd.get('ability') || ''), spell: String(fd.get('spell') || '') }); });
         shell.querySelector('[data-apply-prose]')?.addEventListener('click', () => request('apply_prose_suggestion'));
         shell.querySelector('[data-dismiss-prose]')?.addEventListener('click', () => request('dismiss_prose_review'));
+        const opacitySlider = shell.querySelector('[data-widget-opacity-slider]');
+        const opacityValue = shell.querySelector('[data-widget-opacity-value]');
+        opacitySlider?.addEventListener('input', () => { const value = normalizeWidgetOpacity(opacitySlider.value); if (opacityValue)
+            opacityValue.textContent = `${Math.round(value * 100)}%`; applyWidgetOpacity(value); });
         updatePointBuy();
     }
     function updateWidget() {
         if (!widget || !dashboard)
             return;
         const s = dashboard.state || {}, p = s.player, h = s.health?.user, pr = s.progression || {}, w = s.world || {}, pending = s.economy?.pendingPrice;
+        applyWidgetOpacity(dashboard.settings?.trackerWidgetBackgroundOpacity);
         widget.setVisible?.(dashboard.settings?.showTrackerWidget !== false);
         if (!dashboard.chatId) {
             widget.root.innerHTML = '<div class="se-widget-panel"><div class="se-widget-head"><div class="se-widget-title"><b>Story Engine</b><span class="se-muted">No active chat</span></div><button class="se-widget-open" data-widget-open>Open</button></div><div class="se-widget-scroll"><div class="se-widget-empty">Open a Lumiverse chat and Story Engine will attach automatically.</div></div></div>';
@@ -213,13 +232,16 @@ export function setup(ctx) {
                 chatHint = id;
             const bootstrap = payload?.state?.bootstrap || {};
             const status = String(bootstrap.status || 'none');
-            const previousScopeFailure = status === 'failed' && /userId is required for operator-scoped extensions/i.test(String(bootstrap.error || ''));
-            const shouldAuto = Boolean(id && payload?.settings?.autoBootstrapExistingChat !== false && (status === 'none' || status === 'idle' || previousScopeFailure));
-            const autoKey = `${id}|${status}|${String(bootstrap.error || '')}`;
+            const importError = String(bootstrap.error || '');
+            const previousScopeFailure = status === 'failed' && /userId is required for operator-scoped extensions/i.test(importError);
+            const recoverableInterrupted = status === 'failed' && /(interrupted before completion|stopped responding|timed out)/i.test(importError);
+            const shouldAuto = Boolean(id && payload?.settings?.autoBootstrapExistingChat !== false && (status === 'none' || status === 'idle' || previousScopeFailure || recoverableInterrupted));
+            const autoKey = `${id}|${status}|${importError}`;
             render();
+            scheduleBootstrapPoll();
             if (shouldAuto && !autoImportAttempted.has(autoKey)) {
                 autoImportAttempted.add(autoKey);
-                setTimeout(() => { setBusy('history'); void request('import_existing_history', { chatId: id, auto: true }); }, 0);
+                setTimeout(() => { setBusy('history'); void request('import_existing_history', { chatId: id, auto: true }); scheduleBootstrapPoll(); }, 0);
             }
         }
         else if (payload?.type === 'player_created') {
@@ -257,7 +279,8 @@ export function setup(ctx) {
     const unsubPersona = ctx.events.on('PERSONA_CHANGED', (payload) => { personaHint = String(payload?.persona?.id || payload?.id || ''); request('get_dashboard', { chatId: chatHint, personaId: personaHint }); });
     const unsubActivate = tab.onActivate(() => request('get_dashboard'));
     request('get_dashboard');
-    return () => { unsubBackend(); unsubGen(); unsubChat(); unsubChatChanged(); unsubMessageSent(); unsubUserRendered(); unsubCharacterRendered(); unsubSettings(); unsubPersona(); unsubActivate(); unsubAction(); inputAction.destroy(); widget?.destroy?.(); tab.destroy(); removeStyle(); ctx.dom.cleanup(); };
+    return () => { if (bootstrapPollTimer)
+        clearTimeout(bootstrapPollTimer); unsubBackend(); unsubGen(); unsubChat(); unsubChatChanged(); unsubMessageSent(); unsubUserRendered(); unsubCharacterRendered(); unsubSettings(); unsubPersona(); unsubActivate(); unsubAction(); inputAction.destroy(); widget?.destroy?.(); tab.destroy(); removeStyle(); ctx.dom.cleanup(); };
 }
 function renderOverview(s, settings, p, busy, dashboard) {
     const h = s.health?.user;
@@ -321,6 +344,7 @@ function widgetPresentNpcs(s) {
 function visibleNpcCondition(h) { if (h?.dead)
     return 'dead'; if ((h?.currentHp ?? 1) <= 0 && h?.nonlethalDefeat)
     return 'incapacitated'; const max = Math.max(1, Number(h?.maxHp || 1)), ratio = Math.max(0, Number(h?.currentHp || 0) / max); return ratio >= 1 ? 'healthy' : ratio >= .76 ? 'bruised' : ratio >= .51 ? 'wounded' : ratio >= .26 ? 'badly wounded' : 'critical'; }
+function normalizeWidgetOpacity(value) { const n = Number(value); return Number.isFinite(n) ? Math.max(.4, Math.min(1, n)) : .95; }
 function widgetSection(label, items) { const clean = (items || []).map(x => String(x || '').trim()).filter(Boolean); return `<div class="se-widget-section"><span class="se-widget-label">${esc(label)}</span>${clean.length ? `<div class="se-widget-chips">${clean.map(x => `<span class="se-widget-chip">${esc(x)}</span>`).join('')}</div>` : '<div class="se-widget-empty">—</div>'}</div>`; }
 function renderProgression(s, p, opts, busy) {
     const pr = s.progression || {};
@@ -336,19 +360,33 @@ function renderSettings(s, connections) {
   ${toggle('oocCommandsEnabled', 'OOC commands ((...))', s.oocCommandsEnabled !== false, 'Double-parenthesis text is handled by the Command Assistant as authoritative mechanical/retcon edits and removed from IC narration.')}${toggle('autoBootstrapExistingChat', 'Auto-import existing chat history', s.autoBootstrapExistingChat !== false, 'When Story Engine is attached to an established chat, read the canonical history and reconstruct state before continuing.')}
   ${toggle('randomEvents', 'Random event engine', s.randomEvents, 'Contextual interruptions/complications/benefits only when eligible.')}<div class="se-field"><label>Random event chance per eligible turn (0–0.5)</label><input type="number" step="0.01" min="0" max="0.5" name="randomEventChance" value="${attr(s.randomEventChance ?? .08)}"></div>
   ${toggle('proactivity', 'NPC proactivity', s.proactivity, 'Allows NPC initiative from relationship and scene pressure.')}${toggle('powerActors', 'Power actors', s.powerActors, 'Archives strategic favors, grievances, threats and delayed plans.')}${toggle('progression', 'Progression / XP', s.progression, 'Awards deterministic XP and milestones.')}${toggle('trackerPostPass', 'Post-narration continuity archivist', s.trackerPostPass, 'Captures only durable facts actually established in the final narration.')}${toggle('showTrackerWidget', 'Floating player HUD', s.showTrackerWidget, 'Shows health, level/XP, stats, money, inventory, equipment, abilities, spells, wounds/conditions, tasks/commitments, current scene and NPCs physically present.')}
+  <div class="se-field"><label>Floating HUD background opacity · <b data-widget-opacity-value>${esc(Math.round(normalizeWidgetOpacity(s.trackerWidgetBackgroundOpacity) * 100))}%</b></label><input type="range" min="0.4" max="1" step="0.05" name="trackerWidgetBackgroundOpacity" data-widget-opacity-slider value="${attr(normalizeWidgetOpacity(s.trackerWidgetBackgroundOpacity))}"><div class="se-muted">Controls only the popup background. Text and HUD contents remain fully opaque. 100% is completely solid.</div></div>
   <div class="se-grid"><div class="se-field"><label>Prose Guard mode</label><select name="proseGuardMode">${options(['off', 'review', 'automatic'], s.proseGuardMode || 'review')}</select></div><div class="se-field"><label>Prose Guard connection</label>${conn('proseGuardConnectionId', s.proseGuardConnectionId, 'Auto · semantic/default usable profile')}</div></div>
   ${fieldArea('proseGuardExtraPhrases', 'Additional banned phrases (one per line)', (s.proseGuardExtraPhrases || []).join('\n'))}${toggle('debug', 'Debug mode', s.debug, 'Keeps extra audit detail; never exposes hidden mechanics to narration.')}
   <div class="se-row"><button type="button" class="se-btn primary" data-save-settings>Save settings</button><button type="button" class="se-btn danger" data-reset>Reset this chat state</button></div>
   </form></div></section>`;
 }
 function renderHostContext(dashboard, s) { const chat = dashboard?.chatInfo; const persona = dashboard?.activePersona; const count = Number.isFinite(Number(dashboard?.liveMessageCount)) ? Number(dashboard.liveMessageCount) : Number(s?.bootstrap?.sourceMessageCount || 0); return `<section class="se-section"><header>Lumiverse context</header><div class="se-body"><div class="se-grid"><div class="se-card"><b>Chat</b><div>${esc(chat?.name || dashboard?.chatId || 'Not detected')}</div><div class="se-muted">${dashboard?.chatId ? `id ${esc(dashboard.chatId)} · ${esc(count)} known canonical message(s)` : 'No active chat id received from Lumiverse.'}</div></div><div class="se-card"><b>Active persona</b><div>${esc(persona?.name || 'Not detected')}</div><div class="se-muted">${persona?.id ? `id ${esc(persona.id)}` : dashboard?.personaHintId ? `Lumiverse reported persona id ${esc(dashboard.personaHintId)}, but the backend could not resolve it.` : 'No activePersonaId was received.'}</div></div></div></div></section>`; }
-function renderBootstrapStatus(s, busy, dashboard) { const b = s.bootstrap || { status: 'none', sourceMessageCount: 0 }; const live = Number.isFinite(Number(dashboard?.liveMessageCount)) ? Number(dashboard.liveMessageCount) : null; const observed = live ?? Number(b.sourceMessageCount || 0); if (b.status === 'importing' || busy === 'history')
-    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-warn">Importing the existing conversation history… ${esc(observed)} canonical message(s) detected.</div></div></section>`; if (b.status === 'ready') {
-    const n = Number(b.sourceMessageCount || 0);
-    const stale = live != null && live > n && n < 3;
-    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-card"><b>Story Engine attached</b><div class="se-muted">${stale ? `The host currently reports ${esc(live)} canonical messages; the previous ${esc(n)}-message early attach is stale and will be reconstructed.` : n < 3 ? `${esc(n)} canonical message(s) found at attachment time; no reconstruction was necessary.` : `${esc(n)} canonical messages were read to reconstruct Story Engine state.`}</div></div>${n >= 3 || stale ? '<button class="se-btn" data-import-history>Re-import entire history</button>' : ''}</div></section>`;
-} if (b.status === 'failed')
-    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-warn"><b>Attached, but history import needs attention.</b><div class="se-muted">${esc(b.error || 'Unknown error')}</div></div><button class="se-btn" data-import-history>Retry history import</button></div></section>`; return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-muted">Story Engine attaches automatically. ${live != null ? `Lumiverse currently reports ${esc(live)} canonical message(s) in this chat. ` : ''}If this conversation already contains RP history, it will reconstruct its state from those saved messages.</div><button class="se-btn" data-import-history>Import existing history now</button></div></section>`; }
+function renderBootstrapStatus(s, busy, dashboard) {
+    const b = s.bootstrap || { status: 'none', sourceMessageCount: 0 };
+    const live = Number.isFinite(Number(dashboard?.liveMessageCount)) ? Number(dashboard.liveMessageCount) : null;
+    const observed = live ?? Number(b.sourceMessageCount || 0);
+    if (b.status === 'importing' || busy === 'history') {
+        const completed = Math.max(0, Number(b.completedChunks || 0));
+        const total = Math.max(0, Number(b.totalChunks || 0));
+        const progress = total > 0 ? ` · chunk ${Math.min(completed + 1, total)}/${total}` : '';
+        const stage = String(b.stage || 'preparing history');
+        return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-warn"><b>Importing the existing conversation history…</b><div class="se-muted">${esc(observed)} canonical message(s) detected · ${esc(stage)}${esc(progress)}</div></div><div class="se-row"><button class="se-btn" data-refresh>Refresh status</button><button class="se-btn danger" data-cancel-history>Cancel import</button></div></div></section>`;
+    }
+    if (b.status === 'ready') {
+        const n = Number(b.sourceMessageCount || 0);
+        const stale = live != null && live > n && n < 3;
+        return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-card"><b>Story Engine attached</b><div class="se-muted">${stale ? `The host currently reports ${esc(live)} canonical messages; the previous ${esc(n)}-message early attach is stale and will be reconstructed.` : n < 3 ? `${esc(n)} canonical message(s) found at attachment time; no reconstruction was necessary.` : `${esc(n)} canonical messages were read to reconstruct Story Engine state.`}</div></div>${n >= 3 || stale ? '<button class="se-btn" data-import-history>Re-import entire history</button>' : ''}</div></section>`;
+    }
+    if (b.status === 'failed')
+        return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-warn"><b>Attached, but history import needs attention.</b><div class="se-muted">${esc(b.error || 'Unknown error')}</div>${b.stage ? `<div class="se-muted">Last stage: ${esc(b.stage)}</div>` : ''}</div><button class="se-btn" data-import-history>Retry history import</button></div></section>`;
+    return `<section class="se-section"><header>Chat attachment</header><div class="se-body"><div class="se-muted">Story Engine attaches automatically. ${live != null ? `Lumiverse currently reports ${esc(live)} canonical message(s) in this chat. ` : ''}If this conversation already contains RP history, it will reconstruct its state from those saved messages.</div><button class="se-btn" data-import-history>Import existing history now</button></div></section>`;
+}
 function connectionOptions(connections, selected) { return connections.map(c => { const detail = [c.provider, c.model].filter(Boolean).join(' / '); const unavailable = c.hasApiKey === false; const suffix = `${detail ? ' — ' + detail : ''}${c.isDefault ? ' · default' : ''}${unavailable ? ' · no API key' : ''}`; return `<option value="${attr(c.id)}" ${c.id === selected ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${esc(c.name + suffix)}</option>`; }).join(''); }
 function renderAudit(s) { const audits = [...(s.audits || [])].reverse(); return `<section class="se-section"><header>Turn audit</header><div class="se-body"><div class="se-muted">Mechanical results are visible here for debugging, never injected into final prose as numbers.</div><div class="se-list">${audits.length ? audits.map((a) => `<details class="se-card"><summary><b>Turn ${esc(a.turn)}</b> · ${esc(a.summary || '')}</summary><div class="se-code">${esc(JSON.stringify({ rolls: a.rolls, xpAward: a.xpAward, proseFindings: a.proseFindings, notes: a.notes }, null, 2))}</div></details>`).join('') : '<div class="se-muted">No finalized turns yet.</div>'}</div></div></section>`; }
 function fieldArea(name, label, value) { return `<div class="se-field"><label>${esc(label)}</label><textarea name="${attr(name)}">${esc(value)}</textarea></div>`; }

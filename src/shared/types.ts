@@ -291,6 +291,7 @@ export interface StorySettings {
   progression: boolean;
   trackerPostPass: boolean;
   showTrackerWidget: boolean;
+  trackerWidgetBackgroundOpacity: number;
   nameStyle: string;
   debug: boolean;
 }
@@ -470,7 +471,16 @@ export interface BootstrapState {
   importedAt?: number;
   lastMessageId?: string;
   error?: string;
+  /** Wall-clock start of the current/last import attempt. */
+  startedAt?: number;
+  /** Last persisted progress heartbeat for stuck-import detection. */
+  updatedAt?: number;
+  /** Human-readable import stage surfaced in the UI. */
+  stage?: string;
+  completedChunks?: number;
+  totalChunks?: number;
 }
+
 
 export interface CommandAudit {
   fingerprint: string;

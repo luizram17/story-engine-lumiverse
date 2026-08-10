@@ -17,6 +17,10 @@ const activeChatByUser = new Map();
 const activePersonaByUser = new Map();
 const userByChat = new Map();
 const bootstrapInFlight = new Set();
+const bootstrapAbortByChat = new Map();
+const DEFAULT_ASSISTANT_TIMEOUT_MS = 75_000;
+const HISTORY_IMPORT_CHUNK_TIMEOUT_MS = 60_000;
+const HISTORY_IMPORT_STALE_MS = 90_000;
 let interceptorRegistered = false;
 let generationEventsRegistered = false;
 let frontendRegistered = false;
@@ -28,29 +32,71 @@ catch {
     return false;
 } }
 function errorMessage(err) { return err instanceof Error ? err.message : String(err || ''); }
-async function quietForUser(input, userId) {
+function generationScopeRequired(err) { return /userId is required for operator-scoped extensions/i.test(errorMessage(err)); }
+function generationUserFieldRejected(err) { return /(?:unknown|unexpected|unrecognized|additional|invalid).*userId|userId.*(?:unknown|unexpected|unrecognized|additional|invalid)/i.test(errorMessage(err)); }
+function generationAbortLike(err) { return String(err?.name || '') === 'AbortError' || /\babort(?:ed|error)?\b/i.test(errorMessage(err)); }
+async function invokeGenerationMethod(method, input, userId) {
+    const fn = spindle.generate?.[method];
+    if (typeof fn !== 'function')
+        throw new Error(`Lumiverse generation method ${method}() is unavailable.`);
     if (!userId)
-        return spindle.generate.quiet(input);
-    // Lumiverse's published GenerationRequestDTO currently omits userId, while real
-    // operator-scoped runtimes can require it. Carry it both in the request and as the
-    // legacy/scoped second argument so either runtime shape has the originating user.
+        return fn(input);
     const scoped = { ...input, userId };
     try {
-        return await spindle.generate.quiet(scoped, userId);
+        return await fn(scoped, userId);
     }
     catch (err) {
-        const message = errorMessage(err);
-        // A scope failure happens before provider dispatch, so a single raw-provider
-        // retry is safe and covers runtimes whose quiet wrapper does not forward userId.
-        if (/userId is required for operator-scoped extensions/i.test(message) && typeof spindle.generate?.raw === 'function') {
-            return spindle.generate.raw(scoped, userId);
-        }
-        // Older strict DTO validators may reject the extra field while accepting the
-        // second scoped argument.
-        if (/(?:unknown|unexpected|unrecognized|additional).*userId/i.test(message)) {
-            return spindle.generate.quiet(input, userId);
+        // These are request-shape/scope errors raised before provider dispatch, so it
+        // is safe to retry the same generation with the alternate runtime signature.
+        if (generationUserFieldRejected(err))
+            return fn(input, userId);
+        if (extraArgRejected(err))
+            return fn(scoped);
+        if (generationScopeRequired(err)) {
+            try {
+                return await fn(scoped);
+            }
+            catch (second) {
+                if (generationUserFieldRejected(second))
+                    return fn(input, userId);
+                throw second;
+            }
         }
         throw err;
+    }
+}
+async function quietForUser(input, userId, options = {}) {
+    const timeoutMs = Math.max(5_000, Math.min(180_000, Number(options.timeoutMs || DEFAULT_ASSISTANT_TIMEOUT_MS)));
+    const parentSignal = input?.signal;
+    const controller = new AbortController();
+    let timedOut = false;
+    const onParentAbort = () => controller.abort();
+    if (parentSignal) {
+        if (parentSignal.aborted)
+            controller.abort();
+        else
+            parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    const request = { ...input, signal: controller.signal };
+    // Every Story Engine sidecar resolves a concrete connection profile first.
+    // raw() is therefore the correct primitive: it is direct, does not depend on
+    // the host's active preset/profile, and supports the same tools/reasoning DTO.
+    const primary = request.connection_id && typeof spindle.generate?.raw === 'function' ? 'raw' : 'quiet';
+    try {
+        return await invokeGenerationMethod(primary, request, userId);
+    }
+    catch (err) {
+        if (timedOut)
+            throw new Error(`Assistant generation timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+        if (parentSignal?.aborted || generationAbortLike(err))
+            throw new Error('Assistant generation cancelled.');
+        throw err;
+    }
+    finally {
+        clearTimeout(timer);
+        if (parentSignal)
+            parentSignal.removeEventListener('abort', onParentAbort);
     }
 }
 function extraArgRejected(err) {
@@ -289,12 +335,35 @@ function storyDataContext(state) {
     const json = JSON.stringify(data, null, 2);
     return json.length <= 36000 ? json : `${buildStateContext(state)}\n\n[Full state omitted from prompt because it is very large; use the tracker summary above.]`;
 }
-async function runMutationAssistant(messages, toolName, connectionId, userId) {
-    const result = await quietForUser({ messages, tools: [mutationTool(toolName)], parameters: { temperature: 0.05, max_tokens: 3200 }, connection_id: connectionId || undefined, reasoning: { source: 'off' } }, userId);
-    const call = result?.tool_calls?.find((x) => x?.name === toolName) || result?.tool_calls?.[0];
-    const payload = call?.args ?? parseJsonContent(result?.content);
+function toolCallingUnsupported(err) {
+    const m = errorMessage(err).toLowerCase();
+    return /tools?|tool[_ -]?choice|function(?:[_ -]?call(?:ing)?)?/.test(m) && /(unsupported|not supported|does not support|unavailable|disabled|unknown|unrecognized|invalid|not allowed)/.test(m);
+}
+async function runMutationAssistant(messages, toolName, connectionId, userId, options = {}) {
+    const base = { messages, parameters: { temperature: 0.05, max_tokens: 3200 }, connection_id: connectionId || undefined, reasoning: { source: 'off' }, signal: options.signal };
+    let result;
+    try {
+        result = await quietForUser({ ...base, tools: [mutationTool(toolName)] }, userId, { timeoutMs: options.timeoutMs });
+    }
+    catch (err) {
+        if (!toolCallingUnsupported(err))
+            throw err;
+        spindle.log?.warn?.(`${toolName}: selected provider rejected tools; retrying once with strict JSON output.`);
+        result = await quietForUser(base, userId, { timeoutMs: options.timeoutMs });
+    }
+    let call = result?.tool_calls?.find((x) => x?.name === toolName) || result?.tool_calls?.[0];
+    let payload = call?.args ?? parseJsonContent(result?.content);
+    if (!payload) {
+        // Some OpenAI-compatible endpoints accept the tools field but silently ignore
+        // it. One text-only retry lets the same assistant return the JSON fallback
+        // requested in the prompt rather than leaving the import unusable.
+        spindle.log?.warn?.(`${toolName}: no tool/JSON payload returned; retrying once without tools.`);
+        result = await quietForUser(base, userId, { timeoutMs: options.timeoutMs });
+        call = result?.tool_calls?.find((x) => x?.name === toolName) || result?.tool_calls?.[0];
+        payload = call?.args ?? parseJsonContent(result?.content);
+    }
     if (!payload)
-        throw new Error(`No structured payload returned by ${toolName}.`);
+        throw new Error(`No structured payload returned by ${toolName}. Select a model that supports tools or reliable JSON output.`);
     return normalizeMutationBatch(payload);
 }
 async function applyOocCommands(chatId, commands, messages, settings, state, context, fingerprint) {
@@ -336,22 +405,46 @@ function splitTranscript(messages, maxChars = 26000) {
     return chunks.filter(Boolean);
 }
 function bootstrapEligible(state) { return state.bootstrap.status !== 'ready' && state.turn === 0 && state.audits.length === 0; }
+function bootstrapLastMessageId(messages) { return String(messages.length ? messages[messages.length - 1]?.id || '' : '') || ''; }
+function bootstrapProgress(state, messages, patch = {}) {
+    const now = Date.now();
+    state.bootstrap = {
+        ...state.bootstrap,
+        status: 'importing',
+        sourceMessageCount: messages.length,
+        lastMessageId: bootstrapLastMessageId(messages) || undefined,
+        startedAt: state.bootstrap.startedAt || now,
+        updatedAt: now,
+        ...patch,
+    };
+}
 async function bootstrapExistingChat(chatId, userId, force = false) {
-    if (bootstrapInFlight.has(chatId))
+    if (bootstrapInFlight.has(chatId)) {
+        if (userId)
+            await sendDashboard(userId, chatId, false);
         return;
+    }
     const settings = await loadSettings(userId);
-    if (!has('generation') || !has('chat_mutation'))
-        return;
     let state = await loadState(chatId);
-    if (!force && !bootstrapEligible(state))
+    if (!has('generation') || !has('chat_mutation')) {
+        state.bootstrap = { ...state.bootstrap, status: 'failed', sourceMessageCount: state.bootstrap.sourceMessageCount || 0, updatedAt: Date.now(), stage: 'permission check', error: 'History import requires both generation and chat_mutation permissions.' };
+        await saveState(chatId, state);
+        if (userId)
+            await sendDashboard(userId, chatId, false);
         return;
+    }
+    if (!force && !bootstrapEligible(state)) {
+        if (userId)
+            await sendDashboard(userId, chatId, false);
+        return;
+    }
     let messages = [];
     try {
         messages = await spindle.chat.getMessages(chatId);
     }
     catch (err) {
         const msg = `History read failed: ${errorMessage(err)}`;
-        state.bootstrap = { status: 'failed', sourceMessageCount: 0, error: msg };
+        state.bootstrap = { status: 'failed', sourceMessageCount: 0, error: msg, updatedAt: Date.now(), stage: 'reading canonical history' };
         await saveState(chatId, state);
         spindle.log?.warn?.(`History import could not read chat ${chatId}: ${String(err)}`);
         if (force)
@@ -362,18 +455,22 @@ async function bootstrapExistingChat(chatId, userId, force = false) {
     }
     if (!force && messages.length < 3) {
         // A new/short chat is already attached: there simply is not enough prior RP to reconstruct.
-        state.bootstrap = { status: 'ready', sourceMessageCount: messages.length, importedAt: Date.now(), lastMessageId: String(messages.at(-1)?.id || '') || undefined };
+        state.bootstrap = { status: 'ready', sourceMessageCount: messages.length, importedAt: Date.now(), lastMessageId: bootstrapLastMessageId(messages) || undefined, updatedAt: Date.now(), stage: 'complete', completedChunks: 0, totalChunks: 0 };
         await saveState(chatId, state);
         if (userId)
             await sendDashboard(userId, chatId, false);
         return;
     }
+    const controller = new AbortController();
     bootstrapInFlight.add(chatId);
-    state.bootstrap = { status: 'importing', sourceMessageCount: messages.length, lastMessageId: String(messages.at(-1)?.id || '') || undefined };
+    bootstrapAbortByChat.set(chatId, controller);
+    const startedAt = Date.now();
+    state.bootstrap = { status: 'importing', sourceMessageCount: messages.length, lastMessageId: bootstrapLastMessageId(messages) || undefined, startedAt, updatedAt: startedAt, stage: 'preparing transcript', completedChunks: 0, totalChunks: 0 };
     await saveState(chatId, state);
     if (userId)
         await sendDashboard(userId, chatId, false);
     let importStage = 'persona context';
+    let totalOperations = 0;
     try {
         let persona = null;
         try {
@@ -382,36 +479,64 @@ async function bootstrapExistingChat(chatId, userId, force = false) {
         catch { }
         const personaContext = persona ? `Name: ${persona.name || ''}\nTitle: ${persona.title || ''}\nDescription:\n${persona.description || ''}` : '';
         const chunks = splitTranscript(messages);
+        state = await loadState(chatId);
+        bootstrapProgress(state, messages, { stage: 'connection resolution', totalChunks: chunks.length, completedChunks: 0, startedAt });
+        await saveState(chatId, state);
+        if (userId)
+            await sendDashboard(userId, chatId, false);
         importStage = 'connection resolution';
         const bootstrapConnection = requireConnection(await resolveConnectionId(settings.bootstrapConnectionId, settings.semanticConnectionId, '', userId), 'History Import Assistant');
         for (let i = 0; i < chunks.length; i++) {
+            if (controller.signal.aborted)
+                throw new Error('Assistant generation cancelled.');
             importStage = `assistant generation ${i + 1}/${chunks.length}`;
-            const batch = await runMutationAssistant(bootstrapAssistantPrompt(chunks[i], storyDataContext(state), personaContext, i + 1, chunks.length), 'apply_story_history_import', bootstrapConnection, userId);
+            state = await loadState(chatId);
+            bootstrapProgress(state, messages, { stage: importStage, totalChunks: chunks.length, completedChunks: i, startedAt });
+            await saveState(chatId, state);
+            if (userId)
+                await sendDashboard(userId, chatId, false);
+            const batch = await runMutationAssistant(bootstrapAssistantPrompt(chunks[i], storyDataContext(state), personaContext, i + 1, chunks.length), 'apply_story_history_import', bootstrapConnection, userId, { signal: controller.signal, timeoutMs: HISTORY_IMPORT_CHUNK_TIMEOUT_MS });
+            // If a watchdog invalidated this attempt while the provider was returning,
+            // never let the old task overwrite a newer retry.
+            if (bootstrapAbortByChat.get(chatId) !== controller)
+                return;
+            totalOperations += batch.operations.length;
             const hadPlayer = Boolean(state.player);
             state = applyMutationBatch(state, batch).state;
             if (!hadPlayer && state.player)
                 state.player.stats = normalizeStartingStatBudget(state.player.stats);
-            state.bootstrap = { status: 'importing', sourceMessageCount: messages.length, lastMessageId: String(messages.at(-1)?.id || '') || undefined };
+            bootstrapProgress(state, messages, { stage: `applied chunk ${i + 1}/${chunks.length}`, totalChunks: chunks.length, completedChunks: i + 1, startedAt });
             await saveState(chatId, state);
+            if (userId)
+                await sendDashboard(userId, chatId, false);
         }
-        state.bootstrap = { status: 'ready', sourceMessageCount: messages.length, importedAt: Date.now(), lastMessageId: String(messages.at(-1)?.id || '') || undefined };
+        if (messages.length >= 3 && totalOperations === 0) {
+            throw new Error('History assistant returned no state changes. Select a different History Import connection/model or retry.');
+        }
+        state.bootstrap = { status: 'ready', sourceMessageCount: messages.length, importedAt: Date.now(), lastMessageId: bootstrapLastMessageId(messages) || undefined, startedAt, updatedAt: Date.now(), stage: 'complete', completedChunks: chunks.length, totalChunks: chunks.length };
         await saveState(chatId, state);
         if (force)
             spindle.toast?.success?.(`Story Engine imported ${messages.length} existing message(s).`);
     }
     catch (err) {
+        if (bootstrapAbortByChat.get(chatId) !== controller)
+            return;
         state = await loadState(chatId);
         const detail = errorMessage(err);
-        state.bootstrap = { status: 'failed', sourceMessageCount: messages.length, lastMessageId: String(messages.at(-1)?.id || '') || undefined, error: `${importStage}: ${detail}` };
+        const cancelled = /cancelled/i.test(detail) || controller.signal.aborted;
+        state.bootstrap = { ...state.bootstrap, status: 'failed', sourceMessageCount: messages.length, lastMessageId: bootstrapLastMessageId(messages) || undefined, startedAt: state.bootstrap.startedAt || startedAt, updatedAt: Date.now(), stage: importStage, error: cancelled ? 'History import cancelled.' : `${importStage}: ${detail}` };
         await saveState(chatId, state);
         spindle.log?.error?.(`History import failed for ${chatId} during ${importStage}: ${String(err)}`);
-        if (force)
+        if (force && !cancelled)
             spindle.toast?.error?.('Story Engine could not import the existing chat history. Open Story Engine for details.');
     }
     finally {
-        bootstrapInFlight.delete(chatId);
-        if (userId)
-            await sendDashboard(userId, chatId, false);
+        if (bootstrapAbortByChat.get(chatId) === controller) {
+            bootstrapInFlight.delete(chatId);
+            bootstrapAbortByChat.delete(chatId);
+            if (userId)
+                await sendDashboard(userId, chatId, false);
+        }
     }
 }
 async function extractSemantic(messages, context, settings, state, userText) {
@@ -963,6 +1088,18 @@ async function dashboardPayload(userId, hint = '', personaHint = '') {
     const settings = await loadSettings(userId);
     const chatId = await activeChatId(userId, hint);
     const state = chatId ? await loadState(chatId) : createDefaultState();
+    if (chatId && state.bootstrap.status === 'importing') {
+        const heartbeat = Number(state.bootstrap.updatedAt || state.bootstrap.startedAt || 0);
+        const orphaned = !bootstrapInFlight.has(chatId);
+        const stale = heartbeat > 0 && Date.now() - heartbeat > HISTORY_IMPORT_STALE_MS;
+        if (orphaned || stale) {
+            bootstrapAbortByChat.get(chatId)?.abort();
+            bootstrapAbortByChat.delete(chatId);
+            bootstrapInFlight.delete(chatId);
+            state.bootstrap = { ...state.bootstrap, status: 'failed', updatedAt: Date.now(), stage: state.bootstrap.stage || 'history import', error: stale ? 'History import stopped responding and was cancelled. Retry it or choose another History Import connection.' : 'The previous history import was interrupted before completion. Retry it.' };
+            await saveState(chatId, state);
+        }
+    }
     let liveMessageCount;
     let liveLastMessageId = '';
     // Recover from an early attach that saw only the greeting/first message before
@@ -1106,6 +1243,21 @@ function registerFrontend() {
                 if (!chatId)
                     throw new Error('No active chat could be detected.');
                 await handleConvertActivePersona(chatId, userId);
+                return;
+            }
+            if (type === 'cancel_history_import') {
+                if (!chatId)
+                    throw new Error('No active chat could be detected.');
+                bootstrapAbortByChat.get(chatId)?.abort();
+                bootstrapAbortByChat.delete(chatId);
+                bootstrapInFlight.delete(chatId);
+                const st = await loadState(chatId);
+                if (st.bootstrap.status === 'importing') {
+                    st.bootstrap = { ...st.bootstrap, status: 'failed', updatedAt: Date.now(), stage: st.bootstrap.stage || 'history import', error: 'History import cancelled.' };
+                    await saveState(chatId, st);
+                }
+                spindle.toast?.info?.('History import cancelled.');
+                await sendDashboard(userId, chatId, false, personaHint);
                 return;
             }
             if (type === 'import_existing_history') {
