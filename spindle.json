@@ -2,9 +2,9 @@
   "version": "0.1.0",
   "name": "Story Engine for Lumiverse",
   "identifier": "story_engine",
-  "author": "Lumiverse port of ZDOSt/Story-Engine",
-  "github": "https://github.com/yourname/story-engine-lumiverse",
-  "homepage": "https://github.com/yourname/story-engine-lumiverse",
+  "author": "luizram17",
+  "github": "https://github.com/luizram17/story-engine-lumiverse",
+  "homepage": "https://github.com/luizram17/story-engine-lumiverse",
   "description": "Native Lumiverse/Spindle story simulation engine: semantic preflight, deterministic resolution, tracker, hidden health, relationships, economy, world memory, proactivity, progression, name generation and prose guard.",
   "permissions": [
     "generation",

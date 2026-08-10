@@ -8,5 +8,11 @@
     "test": "npm run build && node tests/run-tests.mjs && node tests/runtime-smoke.mjs",
     "pack": "npm run test && node scripts/pack.mjs"
   },
-  "devDependencies": {}
+  "devDependencies": {},
+  "description": "Native Lumiverse/Spindle story simulation engine.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luizram17/story-engine-lumiverse.git"
+  },
+  "homepage": "https://github.com/luizram17/story-engine-lumiverse"
 }

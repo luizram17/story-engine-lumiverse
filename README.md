@@ -69,7 +69,7 @@ No runtime npm dependency is used. The TypeScript source intentionally uses the 
 
 ## Installation
 
-Lumiverse GitHub installation expects a repository with `spindle.json` at its root. Before publishing this port, change the placeholder `github` and `homepage` fields in `spindle.json` to the repository you upload it to, then install that repository through Lumiverse's Spindle extension manager.
+Lumiverse GitHub installation expects a repository with `spindle.json` at its root. Install this extension from `https://github.com/luizram17/story-engine-lumiverse` through Lumiverse's Spindle extension manager.
 
 The extension requests these permissions:
 
