@@ -1,0 +1,12 @@
+{
+  "name": "story-engine-lumiverse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node tests/run-tests.mjs && node tests/runtime-smoke.mjs",
+    "pack": "npm run test && node scripts/pack.mjs"
+  },
+  "devDependencies": {}
+}
